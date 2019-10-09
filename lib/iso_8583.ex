@@ -9,7 +9,7 @@ defmodule Iso8583 do
     {fields, _} =
       field_format_list
       |> Enum.reduce({%{}, msg_data}, fn {position, field_format}, {accum, msg_data2} ->
-        Iso8583V2.extract_field({position, field_format}, {accum, msg_data2})
+        extract_field({position, field_format}, {accum, msg_data2})
       end)
 
     fields
@@ -18,8 +18,7 @@ defmodule Iso8583 do
   def form_field(iso_data) do
     bitmap = create_bitmap(iso_data)
 
-    field_format_list =
-      get_field_format_list(bitmap)
+    field_format_list = get_field_format_list(bitmap)
 
     field_data_values =
       Map.to_list(iso_data)
@@ -42,17 +41,17 @@ defmodule Iso8583 do
     bitmap <> concatenated_fields
   end
 
-  def form_data_field(position, field_format, field_value) do
+  def form_data_field(_position, field_format, field_value) do
     header = form_field_header(field_format, field_value)
     body = form_field_value(field_format, field_value)
     header <> body
   end
 
-  def form_field_header({0, _, _} = field_format, _) do
+  def form_field_header({0, _, _} = _field_format, _) do
     <<>>
   end
 
-  def form_field_header({header_size, data_type, max_len} = _field_format, field_value) do
+  def form_field_header({header_size, data_type, _max_len} = _field_format, field_value) do
     size =
       case data_type do
         :bcd ->
@@ -73,12 +72,11 @@ defmodule Iso8583 do
   end
 
   def form_field_value({header_size, data_type, max_len} = _field_format, field_value) do
-    formatted_field_value =
-      case data_type do
-        :bcd -> field_value |> sanitize_numeric_string |> Base.decode16!()
-        :ascii -> field_value |> check_if_required_pad_left(header_size, data_type, max_len)
-        :binary -> field_value |> pad_left_string_if_odd_length("0") |> Base.decode16!()
-      end
+    case data_type do
+      :bcd -> field_value |> sanitize_numeric_string |> Base.decode16!()
+      :ascii -> field_value |> check_if_required_pad_left(header_size, data_type, max_len)
+      :binary -> field_value |> pad_left_string_if_odd_length("0") |> Base.decode16!()
+    end
   end
 
   def extract_field({position, {0, data_type, max_length}}, {accum, iso_msg}) do
