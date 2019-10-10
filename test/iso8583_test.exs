@@ -9,8 +9,8 @@ defmodule Ex_Iso8583Test do
       assert bin ==
                bin
                |> Ex_Iso8583.bitmap_to_list()
-               |> Ex_Iso8583.add_remove_first_bit()
-               |> Ex_Iso8583.list_of_bits()
+               |> Ex_Iso8583.add_remove_first_field_number()
+               |> Ex_Iso8583.list_of_fields_number_to_bit_list()
                |> Ex_Iso8583.list_to_bitmap()
     end
   end
@@ -20,31 +20,55 @@ defmodule Ex_Iso8583Test do
       assert bin ==
                bin
                |> Ex_Iso8583.bitmap_to_list()
-               |> Ex_Iso8583.add_remove_first_bit()
-               |> Ex_Iso8583.list_of_bits()
+               |> Ex_Iso8583.add_remove_first_field_number()
+               |> Ex_Iso8583.list_of_fields_number_to_bit_list()
                |> Ex_Iso8583.list_to_bitmap()
     end
   end
 
-  property "fn Ex_Iso8583.bitmap_to_list/1 test => list_of_integer_between_2_till_64_ordered -> Ex_Iso8583.bitmap_to_list/1 -> Ex_Iso8583.list_to_bitmap/1 === list_of_integer_between_2_till_64_ordered" do
+  property "fn Ex_Iso8583.bitmap_to_list/1 and list_of_fields_number_to_bit_list/1 test => list_of_integer_between_2_till_64_ordered -> Ex_Iso8583.bitmap_to_list/1 -> Ex_Iso8583.list_to_bitmap/1 === list_of_integer_between_2_till_64_ordered" do
     check all(list <- list_of_integer_between_2_till_64_ordered()) do
       assert list ==
                list
-               |> Ex_Iso8583.add_remove_first_bit()
-               |> Ex_Iso8583.list_of_bits()
+               |> Ex_Iso8583.add_remove_first_field_number()
+               |> Ex_Iso8583.list_of_fields_number_to_bit_list()
                |> Ex_Iso8583.list_to_bitmap()
                |> Ex_Iso8583.bitmap_to_list()
     end
   end
 
-  property "fn Ex_Iso8583.bitmap_to_list/1 test => list_of_integer_between_2_till_128_ordered -> Ex_Iso8583.bitmap_to_list/1 -> Ex_Iso8583.list_to_bitmap/1 === list_of_integer_between_2_till_128_ordered" do
+  property "fn Ex_Iso8583.bitmap_to_list/1 and list_of_fields_number_to_bit_list/1 test => list_of_integer_between_2_till_128_ordered -> Ex_Iso8583.bitmap_to_list/1 -> Ex_Iso8583.list_to_bitmap/1 === list_of_integer_between_2_till_128_ordered" do
     check all(list <- list_of_integer_between_2_till_128_ordered()) do
       assert list ==
                list
-               |> Ex_Iso8583.add_remove_first_bit()
-               |> Ex_Iso8583.list_of_bits()
+               |> Ex_Iso8583.add_remove_first_field_number()
+               |> Ex_Iso8583.list_of_fields_number_to_bit_list()
                |> Ex_Iso8583.list_to_bitmap()
                |> Ex_Iso8583.bitmap_to_list()
+    end
+  end
+
+  property "fn Ex_Iso8583.add_remove_first_field_number/1 test => list_of_integer_between_2_till_64_ordered -> Ex_Iso8583.add_remove_first_field_number/1 === list_of_integer_between_2_till_64_ordered" do
+    check all(list <- list_of_integer_between_2_till_64_ordered()) do
+      assert list ==
+               list
+               |> Ex_Iso8583.add_remove_first_field_number()
+    end
+  end
+
+  property "fn Ex_Iso8583.add_remove_first_field_number/1 test => list_of_integer_between_2_till_128_ordered -> Ex_Iso8583.add_remove_first_field_number/1 === list_of_integer_between_2_till_128_ordered" do
+    check all(list <- list_of_integer_between_2_till_128_ordered()) do
+      assert list ==
+               list
+               |> Ex_Iso8583.add_remove_first_field_number()
+    end
+  end
+
+  property "fn Ex_Iso8583.add_remove_first_field_number/1 test => list_of_integer_between_65_till_128_ordered -> Ex_Iso8583.add_remove_first_field_number/1 === list_of_integer_between_65_till_128_ordered" do
+    check all(list <- list_of_integer_between_65_till_128_ordered()) do
+      assert [1] ++ list ==
+               list
+               |> Ex_Iso8583.add_remove_first_field_number()
     end
   end
 
@@ -63,6 +87,11 @@ defmodule Ex_Iso8583Test do
             false -> [1, 65] ++ &1
           )
     )
+    |> StreamData.map(&Enum.sort(&1))
+  end
+
+  def list_of_integer_between_65_till_128_ordered() do
+    StreamData.uniq_list_of(StreamData.integer(65..128), min_length: 1, max_length: 20)
     |> StreamData.map(&Enum.sort(&1))
   end
 

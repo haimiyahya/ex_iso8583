@@ -1,6 +1,4 @@
 defmodule Ex_Iso8583 do
-  require Integer
-
   def extract_iso_msg(iso_msg_without_tpdu) do
     {:ok, bitmap, msg_data} = split_bitmap_and_msg(iso_msg_without_tpdu)
 
@@ -64,8 +62,8 @@ defmodule Ex_Iso8583 do
 
     header =
       Integer.to_string(size)
-      |> pad_left_string(header_size, "0")
-      |> pad_left_string_if_odd_length("0")
+      |> Util.pad_left_string(header_size, "0")
+      |> Util.pad_left_string_if_odd_length("0")
       |> Base.decode16!()
 
     header
@@ -73,27 +71,27 @@ defmodule Ex_Iso8583 do
 
   def form_field_value({header_size, data_type, max_len} = _field_format, field_value) do
     case data_type do
-      :bcd -> field_value |> sanitize_numeric_string |> Base.decode16!()
-      :ascii -> field_value |> check_if_required_pad_left(header_size, data_type, max_len)
-      :binary -> field_value |> pad_left_string_if_odd_length("0") |> Base.decode16!()
+      :bcd -> field_value |> Util.sanitize_numeric_string() |> Base.decode16!()
+      :ascii -> field_value |> Util.check_if_required_pad_left(header_size, data_type, max_len)
+      :binary -> field_value |> Util.pad_left_string_if_odd_length("0") |> Base.decode16!()
     end
   end
 
   def extract_field({position, {0, data_type, max_length}}, {accum, iso_msg}) do
     {:ok, field_length} =
       case data_type do
-        :bcd -> get_bcd_length(max_length)
+        :bcd -> Util.get_bcd_length(max_length)
         :ascii -> {:ok, max_length}
-        :binary -> get_bcd_length(max_length)
+        :binary -> Util.get_bcd_length(max_length)
       end
 
     <<field_value::binary-size(field_length)>> <> data_remaining = iso_msg
 
     field_value =
       case data_type do
-        :bcd -> convert_bin_to_hex(field_value) |> (fn {:ok, val} -> val end).()
+        :bcd -> Util.convert_bin_to_hex(field_value) |> (fn {:ok, val} -> val end).()
         :ascii -> field_value
-        :binary -> convert_bin_to_hex(field_value) |> (fn {:ok, val} -> val end).()
+        :binary -> Util.convert_bin_to_hex(field_value) |> (fn {:ok, val} -> val end).()
       end
 
     {Map.put_new(accum, position, field_value), data_remaining}
@@ -103,7 +101,7 @@ defmodule Ex_Iso8583 do
     length_header =
       length_header
       |> div(2)
-      |> make_even
+      |> Util.make_even()
 
     <<field_size::binary-size(length_header)>> <> data_remaining1 = iso_msg
 
@@ -111,7 +109,7 @@ defmodule Ex_Iso8583 do
 
     {:ok, field_sz} =
       case data_type do
-        :bcd -> get_bcd_length(field_sz)
+        :bcd -> Util.get_bcd_length(field_sz)
         :ascii -> {:ok, field_sz}
         :binary -> {:ok, field_sz}
       end
@@ -120,9 +118,9 @@ defmodule Ex_Iso8583 do
 
     {:ok, field_value} =
       case data_type do
-        :bcd -> convert_bin_to_hex(field_value)
+        :bcd -> Util.convert_bin_to_hex(field_value)
         :ascii -> {:ok, field_value}
-        :binary -> convert_bin_to_hex(field_value)
+        :binary -> Util.convert_bin_to_hex(field_value)
       end
 
     truncate_length =
@@ -134,100 +132,6 @@ defmodule Ex_Iso8583 do
     <<field_value::binary-size(truncate_length)>> <> _ = field_value
 
     {Map.put_new(accum, position, field_value), data_remaining}
-  end
-
-  def check_if_required_pad_left(value, 0, :bcd, max_len) do
-    pad_left_bcd(value, max_len)
-  end
-
-  def check_if_required_pad_left(value, 0, :ascii, max_len) do
-    pad_left_string(value, max_len, " ")
-  end
-
-  def check_if_required_pad_left(value, _, :bcd, _max_len) do
-    value
-  end
-
-  def check_if_required_pad_left(value, _, :ascii, _max_len) do
-    value
-  end
-
-  def pad_left_bcd(value, max_len) do
-    max_len = div(max_len, 2)
-
-    cond do
-      byte_size(value) < max_len ->
-        for(_i <- 1..(max_len - byte_size(value)), do: <<0>>, into: <<>>) <> value
-
-      byte_size(value) > max_len ->
-        :binary.part(value, byte_size(value) - max_len, max_len)
-
-      byte_size(value) == max_len ->
-        value
-    end
-  end
-
-  def pad_left_string(value, size, padding_string) do
-    cond do
-      byte_size(value) < size ->
-        for(_i <- 1..(size - byte_size(value)), do: padding_string, into: "") <> value
-
-      byte_size(value) > size ->
-        String.slice(value, byte_size(value) - size, size)
-
-      byte_size(value) == size ->
-        value
-    end
-  end
-
-  def sanitize_numeric_string(field_value) do
-    field_value
-    |> String.replace(~r/[^\d]/, "")
-    |> pad_left_string_if_odd_length("0")
-  end
-
-  def pad_left_string_if_odd_length(field_value, padding_char) do
-    case rem(String.length(field_value), 2) > 0 do
-      true -> padding_char <> field_value
-      false -> field_value
-    end
-  end
-
-  def sanitize_and_convert_string_to_int(field_value) do
-    {int_val, _} =
-      field_value
-      |> sanitize_numeric_string
-      |> Integer.parse()
-
-    int_val
-  end
-
-  def get_bcd_length(length) do
-    case is_integer(length) and length > 1 do
-      true -> {:ok, div(make_even(length), 2)}
-      false -> {:error, "Invalid Parameter"}
-    end
-  end
-
-  def convert_bin_to_hex(value) do
-    case is_binary(value) and byte_size(value) > 0 do
-      true -> {:ok, Base.encode16(value)}
-      false -> {:error, "Invalid Parameter"}
-    end
-  end
-
-  def make_even(value) do
-    case is_integer(value) and value > 0 do
-      true ->
-        value +
-          case Integer.is_odd(value) do
-            true -> 1
-            false -> 0
-          end
-
-      false ->
-        value
-    end
   end
 
   def split_bitmap_and_msg(iso_msg_without_tpdu) do
@@ -273,8 +177,8 @@ defmodule Ex_Iso8583 do
     iso_data
     |> remove_empty_or_nil
     |> Map.keys()
-    |> add_remove_first_bit
-    |> list_of_bits
+    |> add_remove_first_field_number
+    |> list_of_fields_number_to_bit_list
     |> list_to_bitmap
   end
 
@@ -285,7 +189,7 @@ defmodule Ex_Iso8583 do
     |> Enum.into(%{})
   end
 
-  def add_remove_first_bit(list) do
+  def add_remove_first_field_number(list) do
     cond do
       Enum.max(list) > 64 and Enum.member?(list, 1) == false -> [1] ++ list
       Enum.max(list) < 64 and Enum.member?(list, 1) == true -> list -- [1]
@@ -293,7 +197,7 @@ defmodule Ex_Iso8583 do
     end
   end
 
-  def list_of_bits(list) do
+  def list_of_fields_number_to_bit_list(list) do
     max_bit =
       case list |> Enum.max() > 64 do
         true -> 128
@@ -371,7 +275,7 @@ defmodule Ex_Iso8583 do
               else: ""
             )
           end).()
-      |> sanitize_and_convert_string_to_int
+      |> Util.sanitize_and_convert_string_to_int()
 
     {position, {length_header, data_type, max_length}}
   end
