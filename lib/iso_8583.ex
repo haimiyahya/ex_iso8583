@@ -167,7 +167,7 @@ defmodule Ex_Iso8583 do
     bitmap
     |> bitmap_to_list
     # remove first element
-    |> Enum.filter(fn {a, _} -> a > 1 end)
+    |> Enum.filter(fn a -> a > 1 end)
     |> get_field_format
     |> Enum.map(fn {a, b} -> parse_data_element_format(a, b) end)
     |> Enum.sort_by(fn {a, _} -> a end)
@@ -184,8 +184,8 @@ defmodule Ex_Iso8583 do
 
   def remove_empty_or_nil(iso_data) do
     iso_data
-    |> Enum.filter(fn {_, v} -> v != nil end)
-    |> Enum.filter(fn {_, v} -> v != "" end)
+    |> Enum.filter(fn {_, val} -> val != nil end)
+    |> Enum.filter(fn {_, val} -> val != "" end)
     |> Enum.into(%{})
   end
 

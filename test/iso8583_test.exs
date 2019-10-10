@@ -26,8 +26,8 @@ defmodule Ex_Iso8583Test do
     end
   end
 
-  property "fn Ex_Iso8583.bitmap_to_list/1 and list_of_fields_number_to_bit_list/1 test => list_of_integer_between_2_till_64_ordered -> Ex_Iso8583.bitmap_to_list/1 -> Ex_Iso8583.list_to_bitmap/1 === list_of_integer_between_2_till_64_ordered" do
-    check all(list <- list_of_integer_between_2_till_64_ordered()) do
+  property "fn Ex_Iso8583.bitmap_to_list/1 and list_of_fields_number_to_bit_list/1 test => list_of_integers_between_2_till_64_ordered -> Ex_Iso8583.bitmap_to_list/1 -> Ex_Iso8583.list_to_bitmap/1 === list_of_integers_between_2_till_64_ordered" do
+    check all(list <- list_of_integers_between_2_till_64_ordered()) do
       assert list ==
                list
                |> Ex_Iso8583.add_remove_first_field_number()
@@ -37,8 +37,8 @@ defmodule Ex_Iso8583Test do
     end
   end
 
-  property "fn Ex_Iso8583.bitmap_to_list/1 and list_of_fields_number_to_bit_list/1 test => list_of_integer_between_2_till_128_ordered -> Ex_Iso8583.bitmap_to_list/1 -> Ex_Iso8583.list_to_bitmap/1 === list_of_integer_between_2_till_128_ordered" do
-    check all(list <- list_of_integer_between_2_till_128_ordered()) do
+  property "fn Ex_Iso8583.bitmap_to_list/1 and list_of_fields_number_to_bit_list/1 test => list_of_integers_between_2_till_128_ordered -> Ex_Iso8583.bitmap_to_list/1 -> Ex_Iso8583.list_to_bitmap/1 === list_of_integers_between_2_till_128_ordered" do
+    check all(list <- list_of_integers_between_2_till_128_ordered()) do
       assert list ==
                list
                |> Ex_Iso8583.add_remove_first_field_number()
@@ -48,36 +48,59 @@ defmodule Ex_Iso8583Test do
     end
   end
 
-  property "fn Ex_Iso8583.add_remove_first_field_number/1 test => list_of_integer_between_2_till_64_ordered -> Ex_Iso8583.add_remove_first_field_number/1 === list_of_integer_between_2_till_64_ordered" do
-    check all(list <- list_of_integer_between_2_till_64_ordered()) do
+  property "fn Ex_Iso8583.add_remove_first_field_number/1 test => list_of_integers_between_2_till_64_ordered -> Ex_Iso8583.add_remove_first_field_number/1 === list_of_integers_between_2_till_64_ordered" do
+    check all(list <- list_of_integers_between_2_till_64_ordered()) do
       assert list ==
                list
                |> Ex_Iso8583.add_remove_first_field_number()
     end
   end
 
-  property "fn Ex_Iso8583.add_remove_first_field_number/1 test => list_of_integer_between_2_till_128_ordered -> Ex_Iso8583.add_remove_first_field_number/1 === list_of_integer_between_2_till_128_ordered" do
-    check all(list <- list_of_integer_between_2_till_128_ordered()) do
+  property "fn Ex_Iso8583.add_remove_first_field_number/1 test => list_of_integers_between_2_till_128_ordered -> Ex_Iso8583.add_remove_first_field_number/1 === list_of_integers_between_2_till_128_ordered" do
+    check all(list <- list_of_integers_between_2_till_128_ordered()) do
       assert list ==
                list
                |> Ex_Iso8583.add_remove_first_field_number()
     end
   end
 
-  property "fn Ex_Iso8583.add_remove_first_field_number/1 test => list_of_integer_between_65_till_128_ordered -> Ex_Iso8583.add_remove_first_field_number/1 === list_of_integer_between_65_till_128_ordered" do
-    check all(list <- list_of_integer_between_65_till_128_ordered()) do
+  property "fn Ex_Iso8583.add_remove_first_field_number/1 test => list_of_integers_between_65_till_128_ordered -> Ex_Iso8583.add_remove_first_field_number/1 === list_of_integers_between_65_till_128_ordered" do
+    check all(list <- list_of_integers_between_65_till_128_ordered()) do
       assert [1] ++ list ==
                list
                |> Ex_Iso8583.add_remove_first_field_number()
     end
   end
 
-  def list_of_integer_between_2_till_64_ordered() do
+  # property "fn Ex_Iso8583.remove_empty_or_nil/1 test => list_of_tuple_with_one_dummy_empty_value -> Ex_Iso8583.add_remove_first_field_number/1 === list_of_tuple_with_one_dummy_empty_value" do
+  #  check all(
+  #          data <-
+  #            list_of_tuple_with_one_dummy_empty_value()
+  #        ) do
+  #    assert Map.delete(data, 2) ==
+  #             data
+  #             |> Ex_Iso8583.remove_empty_or_nil()
+  #  end
+  # end
+
+  # list_of_tuple_with_key_and_string_value_between_1_to_999_length_with_key_2_set_to_empty
+
+  # def list_of_tuple_with_one_dummy_empty_value() do
+  #  StreamData.map_of(
+  #    StreamData.integer(3..64),
+  #    StreamData.string(:ascii, min_length: 1, max_length: 999),
+  #    min_length: 7,
+  #    max_length: 63
+  #  )
+  #  |> StreamData.map(&Map.put_new(&1, 2, ""))
+  # end
+
+  def list_of_integers_between_2_till_64_ordered() do
     StreamData.uniq_list_of(StreamData.integer(2..64), min_length: 1, max_length: 20)
     |> StreamData.map(&Enum.sort(&1))
   end
 
-  def list_of_integer_between_2_till_128_ordered() do
+  def list_of_integers_between_2_till_128_ordered() do
     StreamData.uniq_list_of(StreamData.integer(2..128), min_length: 1, max_length: 20)
     |> StreamData.map(
       &case Enum.any?(&1, fn x -> x >= 65 end),
@@ -90,7 +113,7 @@ defmodule Ex_Iso8583Test do
     |> StreamData.map(&Enum.sort(&1))
   end
 
-  def list_of_integer_between_65_till_128_ordered() do
+  def list_of_integers_between_65_till_128_ordered() do
     StreamData.uniq_list_of(StreamData.integer(65..128), min_length: 1, max_length: 20)
     |> StreamData.map(&Enum.sort(&1))
   end
