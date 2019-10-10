@@ -259,26 +259,11 @@ defmodule Ex_Iso8583 do
     end
   end
 
-  def bitmap_to_list(bitmap) do
-    case is_binary(bitmap) do
-      true ->
-        for(<<r::1 <- bitmap>>, do: r)
-        |> Enum.with_index(1)
-        |> Enum.map(fn {a, b} -> {b, a} end)
-        # remove first element
-        |> Enum.filter(fn {a, _} -> a > 1 end)
-        # remove field where the bit was not set
-        |> Enum.filter(fn {_, b} -> b == 1 end)
-        |> Enum.map(fn {a, _} -> a end)
-
-      false ->
-        []
-    end
-  end
-
   def get_field_format_list(bitmap) do
     bitmap
     |> bitmap_to_list
+    # remove first element
+    |> Enum.filter(fn {a, _} -> a > 1 end)
     |> get_field_format
     |> Enum.map(fn {a, b} -> parse_data_element_format(a, b) end)
     |> Enum.sort_by(fn {a, _} -> a end)
@@ -318,6 +303,21 @@ defmodule Ex_Iso8583 do
     Enum.map(1..max_bit, fn a -> if(Enum.member?(list, a), do: 1, else: 0) end)
     # for a <- 
     # for n <- 1..max_bit, do: case Enum.member?(list, n), do: 1; else: 0 end end 
+  end
+
+  def bitmap_to_list(bitmap) do
+    case is_binary(bitmap) do
+      true ->
+        for(<<r::1 <- bitmap>>, do: r)
+        |> Enum.with_index(1)
+        |> Enum.map(fn {a, b} -> {b, a} end)
+        # remove field where the bit was not set
+        |> Enum.filter(fn {_, b} -> b == 1 end)
+        |> Enum.map(fn {a, _} -> a end)
+
+      false ->
+        []
+    end
   end
 
   def list_to_bitmap(list) do
