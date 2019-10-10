@@ -1,4 +1,4 @@
-defmodule Iso8583 do
+defmodule Ex_Iso8583 do
   require Integer
 
   def extract_iso_msg(iso_msg_without_tpdu) do
@@ -321,7 +321,10 @@ defmodule Iso8583 do
   end
 
   def list_to_bitmap(list) do
-    for i <- list, do: <<i::1>>, into: <<>>
+    case length(list) > 0 do
+      true -> for i <- list, do: <<i::1>>, into: <<>>
+      false -> <<0>>
+    end
   end
 
   def get_field_format(list_of_bit) do
