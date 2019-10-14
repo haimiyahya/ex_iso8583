@@ -13,7 +13,7 @@ defmodule Ex_Iso8583 do
     fields
   end
 
-  def form_field(iso_data) do
+  def form_iso_msg(iso_data) do
     bitmap = create_bitmap(iso_data)
 
     field_format_list = get_field_format_list(bitmap)
@@ -93,6 +93,8 @@ defmodule Ex_Iso8583 do
         :ascii -> field_value
         :binary -> Util.convert_bin_to_hex(field_value) |> (fn {:ok, val} -> val end).()
       end
+
+    field_value = field_value |> Util.truncate_string(max_length)
 
     {Map.put_new(accum, position, field_value), data_remaining}
   end

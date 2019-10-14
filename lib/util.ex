@@ -94,4 +94,8 @@ defmodule Util do
         value
     end
   end
+
+  def truncate_string(value, max_len) do
+    String.slice(value, String.length(value) - max_len, max_len)
+  end
 end
