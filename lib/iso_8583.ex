@@ -1,6 +1,6 @@
 defmodule Ex_Iso8583 do
-  def extract_iso_msg(iso_msg_without_tpdu) do
-    {:ok, bitmap, msg_data} = split_bitmap_and_msg(iso_msg_without_tpdu)
+  def extract_iso_msg(iso_msg_without_tpdu, format) do
+    {:ok, bitmap, msg_data} = split_bitmap_and_msg(iso_msg_without_tpdu, format)
 
     field_format_list = get_field_format_list(bitmap)
 
@@ -136,13 +136,38 @@ defmodule Ex_Iso8583 do
     {Map.put_new(accum, position, field_value), data_remaining}
   end
 
-  def split_bitmap_and_msg(iso_msg_without_tpdu)
+  def split_bitmap_and_msg(iso_msg_without_tpdu, format)
       when is_binary(iso_msg_without_tpdu) and byte_size(iso_msg_without_tpdu) > 0 do
-    split_bitmap_and_msg_p(iso_msg_without_tpdu)
+    iso_msg_without_tpdu
+    |> transform_bitmap(format)
+    |> split_bitmap_and_msg_p
   end
 
   def split_bitmap_and_msg(_iso_msg_without_tpdu) do
     {:error, "Invalid Parameter"}
+  end
+
+  def transform_bitmap(iso_msg_without_tpdu, :binary) do
+    iso_msg_without_tpdu
+  end
+
+  def transform_bitmap(iso_msg_without_tpdu, :ascii) do
+    # get the first byte of the bitmap
+    first_byte =
+      :binary.part(iso_msg_without_tpdu, 0, 2)
+      |> Base.decode16!()
+
+    <<first_bit_flag::1, _tail::bitstring>> = first_byte
+
+    bitmap_size =
+      case first_bit_flag do
+        0 -> 8 * 2
+        1 -> 16 * 2
+      end
+
+    <<bitmap::binary-size(bitmap_size), msg_data::bitstring>> = iso_msg_without_tpdu
+
+    Base.decode16!(bitmap) <> msg_data
   end
 
   def split_bitmap_and_msg_p(<<1::1, _tail::bitstring>> = iso_msg_without_tpdu) do

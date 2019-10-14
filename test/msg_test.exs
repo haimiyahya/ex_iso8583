@@ -15,6 +15,6 @@ defmodule MsgTest do
 
     raw_msg = Ex_Iso8583.form_iso_msg(iso_data)
 
-    assert iso_data == Ex_Iso8583.extract_iso_msg(raw_msg)
+    assert iso_data == Ex_Iso8583.extract_iso_msg(raw_msg, :binary)
   end
 end
