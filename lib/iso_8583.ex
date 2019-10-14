@@ -136,11 +136,13 @@ defmodule Ex_Iso8583 do
     {Map.put_new(accum, position, field_value), data_remaining}
   end
 
-  def split_bitmap_and_msg(iso_msg_without_tpdu) do
-    case check_binary_is_not_empty(iso_msg_without_tpdu) do
-      true -> split_bitmap_and_msg_p(iso_msg_without_tpdu)
-      false -> {:error, "Invalid Parameter"}
-    end
+  def split_bitmap_and_msg(iso_msg_without_tpdu)
+      when is_binary(iso_msg_without_tpdu) and byte_size(iso_msg_without_tpdu) > 0 do
+    split_bitmap_and_msg_p(iso_msg_without_tpdu)
+  end
+
+  def split_bitmap_and_msg(_iso_msg_without_tpdu) do
+    {:error, "Invalid Parameter"}
   end
 
   def split_bitmap_and_msg_p(<<1::1, _tail::bitstring>> = iso_msg_without_tpdu) do
@@ -280,9 +282,5 @@ defmodule Ex_Iso8583 do
       |> Util.sanitize_and_convert_string_to_int()
 
     {position, {length_header, data_type, max_length}}
-  end
-
-  defp check_binary_is_not_empty(val) do
-    is_binary(val) and byte_size(val) > 0
   end
 end
