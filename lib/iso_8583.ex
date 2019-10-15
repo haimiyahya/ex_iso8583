@@ -1,8 +1,8 @@
 defmodule Ex_Iso8583 do
-  def extract_iso_msg(iso_msg_without_tpdu, format) do
-    {:ok, bitmap, msg_data} = split_bitmap_and_msg(iso_msg_without_tpdu, format)
+  def extract_iso_msg(iso_msg_without_tpdu, msg_type) do
+    {:ok, bitmap, msg_data} = split_bitmap_and_msg(iso_msg_without_tpdu, msg_type)
 
-    field_format_list = get_field_format_list(bitmap)
+    field_format_list = get_field_format_list(bitmap, msg_type)
 
     {fields, _} =
       field_format_list
@@ -13,10 +13,10 @@ defmodule Ex_Iso8583 do
     fields
   end
 
-  def form_iso_msg(iso_data) do
+  def form_iso_msg(iso_data, msg_type) do
     bitmap = create_bitmap(iso_data)
 
-    field_format_list = get_field_format_list(bitmap)
+    field_format_list = get_field_format_list(bitmap, msg_type)
 
     field_data_values =
       Map.to_list(iso_data)
@@ -136,10 +136,12 @@ defmodule Ex_Iso8583 do
     {Map.put_new(accum, position, field_value), data_remaining}
   end
 
-  def split_bitmap_and_msg(iso_msg_without_tpdu, format)
+  def split_bitmap_and_msg(iso_msg_without_tpdu, msg_type)
       when is_binary(iso_msg_without_tpdu) and byte_size(iso_msg_without_tpdu) > 0 do
+    bitmap_type = msg_type[:bitmap_type]
+
     iso_msg_without_tpdu
-    |> transform_bitmap(format)
+    |> transform_bitmap(bitmap_type)
     |> split_bitmap_and_msg_p
   end
 
@@ -192,12 +194,14 @@ defmodule Ex_Iso8583 do
     end
   end
 
-  def get_field_format_list(bitmap) do
+  def get_field_format_list(bitmap, msg_type) do
+    field_header_type = msg_type[:field_header_type]
+
     bitmap
     |> bitmap_to_list
     # remove first element
     |> Enum.filter(fn a -> a > 1 end)
-    |> get_field_format
+    |> get_field_format(field_header_type)
     |> Enum.map(fn {a, b} -> parse_data_element_format(a, b) end)
     |> Enum.sort_by(fn {a, _} -> a end)
   end
@@ -260,8 +264,8 @@ defmodule Ex_Iso8583 do
     end
   end
 
-  def get_field_format(list_of_bit) do
-    DataElementFormat.data_element_format_def(false)
+  def get_field_format(list_of_bit, format) do
+    DataElementFormat.data_element_format_def(format)
     |> Enum.filter(fn {position, _} -> Enum.member?(list_of_bit, position) end)
   end
 

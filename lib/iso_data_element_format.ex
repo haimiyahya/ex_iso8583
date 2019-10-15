@@ -261,11 +261,11 @@ defmodule DataElementFormat do
     128 => "b 16"
   }
 
-  def data_element_format_def(is_ascii_format) do
+  def data_element_format_def(field_header_type) do
     format =
-      case is_ascii_format do
-        true -> @data_element_format_ascii
-        false -> @data_element_format_bcd
+      case field_header_type do
+        :ascii -> @data_element_format_ascii
+        :bcd -> @data_element_format_bcd
       end
 
     format

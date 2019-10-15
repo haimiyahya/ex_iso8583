@@ -13,8 +13,9 @@ defmodule MsgTest do
       |> Map.put(63, "123456789012345678901234567890")
       |> Map.put(64, "2487F2488859065A")
 
-    raw_msg = Ex_Iso8583.form_iso_msg(iso_data)
+    config = [bitmap_type: :binary, field_header_type: :bcd]
+    raw_msg = Ex_Iso8583.form_iso_msg(iso_data, config)
 
-    assert iso_data == Ex_Iso8583.extract_iso_msg(raw_msg, :binary)
+    assert iso_data == Ex_Iso8583.extract_iso_msg(raw_msg, config)
   end
 end
