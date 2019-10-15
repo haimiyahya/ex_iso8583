@@ -261,7 +261,7 @@ defmodule Ex_Iso8583 do
   end
 
   def get_field_format(list_of_bit) do
-    ISODataElementFormat.iso_data_element_format_def(false)
+    DataElementFormat.data_element_format_def(false)
     |> Enum.filter(fn {position, _} -> Enum.member?(list_of_bit, position) end)
   end
 

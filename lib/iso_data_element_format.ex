@@ -1,5 +1,5 @@
-defmodule ISODataElementFormat do
-  @iso_data_element_format %{
+defmodule DataElementFormat do
+  @data_element_format_bcd %{
     1 => "b 64",
     2 => "n ..19",
     3 => "n 6",
@@ -130,7 +130,7 @@ defmodule ISODataElementFormat do
     128 => "b 64"
   }
 
-  @iso_data_element_format_ascii %{
+  @data_element_format_ascii %{
     1 => "b 64",
     2 => "n ..19",
     3 => "n 6",
@@ -261,11 +261,11 @@ defmodule ISODataElementFormat do
     128 => "b 16"
   }
 
-  def iso_data_element_format_def(is_ascii_format) do
+  def data_element_format_def(is_ascii_format) do
     format =
       case is_ascii_format do
-        true -> @iso_data_element_format_ascii
-        false -> @iso_data_element_format
+        true -> @data_element_format_ascii
+        false -> @data_element_format_bcd
       end
 
     format
