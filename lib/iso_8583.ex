@@ -7,7 +7,7 @@ defmodule Ex_Iso8583 do
     {fields, _} =
       field_format_list
       |> Enum.reduce({%{}, msg_data}, fn {position, field_format}, {accum, msg_data2} ->
-        extract_field({position, field_format}, {accum, msg_data2})
+        extract_field({position, field_format}, {accum, msg_data2}, msg_type[:field_header_type])
       end)
 
     fields
@@ -77,7 +77,15 @@ defmodule Ex_Iso8583 do
     end
   end
 
-  def extract_field({position, {0, data_type, max_length}}, {accum, iso_msg}) do
+  def extract_field({position, {0, _data_type, max_length}}, {accum, iso_msg}, :ascii) do
+    field_length = max_length
+    <<field_value::binary-size(field_length)>> <> data_remaining = iso_msg
+    field_value = field_value |> Util.truncate_string(max_length)
+
+    {Map.put_new(accum, position, field_value), data_remaining}
+  end
+
+  def extract_field({position, {0, data_type, max_length}}, {accum, iso_msg}, :bcd) do
     {:ok, field_length} =
       case data_type do
         :bcd -> Util.get_bcd_length(max_length)
@@ -99,7 +107,24 @@ defmodule Ex_Iso8583 do
     {Map.put_new(accum, position, field_value), data_remaining}
   end
 
-  def extract_field({position, {length_header, data_type, max_length}}, {accum, iso_msg}) do
+  def extract_field({position, {length_header, _data_type, max_length}}, {accum, iso_msg}, :ascii) do
+    <<field_size::binary-size(length_header)>> <> data_remaining1 = iso_msg
+    {field_sz, _} = field_size |> Integer.parse()
+
+    <<field_value::binary-size(field_sz)>> <> data_remaining = data_remaining1
+
+    truncate_length =
+      cond do
+        field_sz > max_length -> max_length
+        true -> field_sz
+      end
+
+    <<field_value::binary-size(truncate_length)>> <> _ = field_value
+
+    {Map.put_new(accum, position, field_value), data_remaining}
+  end
+
+  def extract_field({position, {length_header, data_type, max_length}}, {accum, iso_msg}, :bcd) do
     length_header =
       length_header
       |> div(2)
