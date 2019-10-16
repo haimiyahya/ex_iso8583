@@ -1,4 +1,4 @@
-# Iso8583
+# Ex_Iso8583
 
 Module to parse and form iso8583 message
 
@@ -10,7 +10,7 @@ by adding `iso8583` to your list of dependencies in `mix.exs`:
 ```elixir
 def deps do
   [
-    {:iso8583, "~> 0.1.0"}
+    {:ex_iso8583, "~> 0.2.0"}
   ]
 end
 ```
