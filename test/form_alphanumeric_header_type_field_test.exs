@@ -41,4 +41,43 @@ defmodule FormAlphanumericHeaderTypeFieldTest do
 
     assert formatted_field == "1112345678901"
   end
+
+  test "for non-fixed size numeric 3 digit header - form_field with one element where message type is ascii encoded" do
+    # non fixed size numeric 3 digit header
+
+    formatted_field =
+      Ex_Iso8583.form_field(
+        {46, {3, :ascii, 999}},
+        "12345678901",
+        :ascii
+      )
+
+    assert formatted_field == "01112345678901"
+  end
+
+  test "for non-fixed size numeric 2 digit header - form_field with one element where message type is ascii encoded with truncation" do
+    # non fixed size numeric 2 digit header with truncation
+
+    formatted_field =
+      Ex_Iso8583.form_field(
+        {99, {2, :bcd, 11}},
+        "123456789012",
+        :ascii
+      )
+
+    assert formatted_field == "1112345678901"
+  end
+
+  test "for non-fixed size alphanumeric 2 digit header - form_field with one element where message type is ascii encoded with truncation" do
+    # non fixed size alphanumeric 2 digit header with truncation
+
+    formatted_field =
+      Ex_Iso8583.form_field(
+        {101, {2, :ascii, 17}},
+        "123456789012345678",
+        :ascii
+      )
+
+    assert formatted_field == "1712345678901234567"
+  end
 end

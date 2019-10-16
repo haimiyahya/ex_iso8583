@@ -48,7 +48,6 @@ defmodule Util do
   def sanitize_numeric_string(field_value) do
     field_value
     |> String.replace(~r/[^\d]/, "")
-    |> pad_left_string_if_odd_length("0")
   end
 
   def pad_left_string_if_odd_length(field_value, padding_char) do
@@ -97,5 +96,9 @@ defmodule Util do
 
   def truncate_string(value, max_len) do
     String.slice(value, String.length(value) - max_len, max_len)
+  end
+
+  def truncate_string_take_left(value, max_len) do
+    String.slice(value, 0, max_len)
   end
 end

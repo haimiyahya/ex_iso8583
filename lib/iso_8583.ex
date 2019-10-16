@@ -75,27 +75,58 @@ defmodule Ex_Iso8583 do
     header
   end
 
-  def form_field_header({_header_size, _data_type, _max_len} = _field_format, field_value, :ascii) do
+  def form_field_header({header_size, _data_type, max_len} = _field_format, field_value, :ascii) do
     size = byte_size(field_value)
 
-    header = Integer.to_string(size)
+    size =
+      cond do
+        size > max_len -> max_len
+        true -> size
+      end
+
+    header =
+      Integer.to_string(size)
+      |> Util.pad_left_string(header_size, "0")
 
     header
   end
 
   def form_field_value({header_size, data_type, max_len} = _field_format, field_value, :bcd) do
     case data_type do
-      :bcd -> field_value |> Util.sanitize_numeric_string() |> Base.decode16!()
-      :ascii -> field_value |> Util.check_if_required_pad_left(header_size, data_type, max_len)
-      :binary -> field_value |> Util.pad_left_string_if_odd_length("0") |> Base.decode16!()
+      :bcd ->
+        field_value
+        |> Util.truncate_string_take_left(max_len)
+        |> Util.sanitize_numeric_string()
+        |> Util.pad_left_string_if_odd_length("0")
+        |> Base.decode16!()
+
+      :ascii ->
+        field_value
+        |> Util.truncate_string_take_left(max_len)
+        |> Util.check_if_required_pad_left(header_size, data_type, max_len)
+
+      :binary ->
+        field_value
+        |> Util.truncate_string_take_left(max_len)
+        |> Util.pad_left_string_if_odd_length("0")
+        |> Base.decode16!()
     end
   end
 
-  def form_field_value({header_size, data_type, max_len} = _field_format, field_value, :ascii) do
+  def form_field_value({_header_size, data_type, max_len} = _field_format, field_value, :ascii) do
     case data_type do
-      :bcd -> field_value |> Util.sanitize_numeric_string()
-      :ascii -> field_value |> Util.check_if_required_pad_left(header_size, data_type, max_len)
-      :binary -> field_value |> Util.pad_left_string_if_odd_length("0") |> Base.decode16!()
+      :bcd ->
+        field_value |> Util.truncate_string_take_left(max_len) |> Util.sanitize_numeric_string()
+
+      :ascii ->
+        field_value
+        |> Util.truncate_string_take_left(max_len)
+
+      :binary ->
+        field_value
+        |> Util.truncate_string_take_left(max_len)
+        |> Util.pad_left_string_if_odd_length("0")
+        |> Base.decode16!()
     end
   end
 
