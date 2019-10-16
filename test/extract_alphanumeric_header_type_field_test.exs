@@ -1,4 +1,4 @@
-defmodule Iso8583Test do
+defmodule ExtractAlphanumericHeaderTypeFieldTest do
   use ExUnit.Case
   doctest Ex_Iso8583
   alias Ex_Iso8583

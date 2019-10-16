@@ -32,24 +32,30 @@ defmodule Ex_Iso8583 do
     formatted_values =
       field_format_and_values
       # will return {a, formatted_field}
-      |> Enum.map(fn {a, b, c} -> {a, form_data_field(a, b, c)} end)
+      |> Enum.map(fn {a, b, c} -> {a, form_field({a, b}, c, msg_type[:field_header_type])} end)
 
     concatenated_fields = List.foldl(formatted_values, "", fn {_, value}, acc -> acc <> value end)
 
     bitmap <> concatenated_fields
   end
 
-  def form_data_field(_position, field_format, field_value) do
-    header = form_field_header(field_format, field_value)
-    body = form_field_value(field_format, field_value)
+  def form_field({_position, field_format}, field_value, :bcd) do
+    header = form_field_header(field_format, field_value, :bcd)
+    body = form_field_value(field_format, field_value, :bcd)
     header <> body
   end
 
-  def form_field_header({0, _, _} = _field_format, _) do
+  def form_field({_position, field_format}, field_value, :ascii) do
+    header = form_field_header(field_format, field_value, :ascii)
+    body = form_field_value(field_format, field_value, :ascii)
+    header <> body
+  end
+
+  def form_field_header({0, _, _} = _field_format, _, _) do
     <<>>
   end
 
-  def form_field_header({header_size, data_type, _max_len} = _field_format, field_value) do
+  def form_field_header({header_size, data_type, _max_len} = _field_format, field_value, :bcd) do
     size =
       case data_type do
         :bcd ->
@@ -69,9 +75,25 @@ defmodule Ex_Iso8583 do
     header
   end
 
-  def form_field_value({header_size, data_type, max_len} = _field_format, field_value) do
+  def form_field_header({_header_size, _data_type, _max_len} = _field_format, field_value, :ascii) do
+    size = byte_size(field_value)
+
+    header = Integer.to_string(size)
+
+    header
+  end
+
+  def form_field_value({header_size, data_type, max_len} = _field_format, field_value, :bcd) do
     case data_type do
       :bcd -> field_value |> Util.sanitize_numeric_string() |> Base.decode16!()
+      :ascii -> field_value |> Util.check_if_required_pad_left(header_size, data_type, max_len)
+      :binary -> field_value |> Util.pad_left_string_if_odd_length("0") |> Base.decode16!()
+    end
+  end
+
+  def form_field_value({header_size, data_type, max_len} = _field_format, field_value, :ascii) do
+    case data_type do
+      :bcd -> field_value |> Util.sanitize_numeric_string()
       :ascii -> field_value |> Util.check_if_required_pad_left(header_size, data_type, max_len)
       :binary -> field_value |> Util.pad_left_string_if_odd_length("0") |> Base.decode16!()
     end
