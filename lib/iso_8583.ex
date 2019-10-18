@@ -1,8 +1,9 @@
 defmodule Ex_Iso8583 do
-  def extract_iso_msg(iso_msg_without_tpdu, msg_type) do
+  def extract_iso_msg(iso_msg_without_tpdu, msg_type, field_format_definition) do
     {:ok, bitmap, msg_data} = IsoBitmap.split_bitmap_and_msg(iso_msg_without_tpdu, msg_type)
 
-    field_format_list = IsoFieldFormat.get_field_format_list(bitmap, msg_type)
+    field_format_list =
+      IsoFieldFormat.get_field_format_list(bitmap, msg_type, field_format_definition)
 
     {fields, _} =
       field_format_list
@@ -17,10 +18,11 @@ defmodule Ex_Iso8583 do
     fields
   end
 
-  def form_iso_msg(iso_data, msg_type) do
+  def form_iso_msg(iso_data, msg_type, field_format_definition) do
     bitmap = IsoBitmap.create_bitmap(iso_data)
 
-    field_format_list = IsoFieldFormat.get_field_format_list(bitmap, msg_type)
+    field_format_list =
+      IsoFieldFormat.get_field_format_list(bitmap, msg_type, field_format_definition)
 
     field_data_values =
       Map.to_list(iso_data)

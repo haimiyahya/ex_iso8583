@@ -1,18 +1,23 @@
 defmodule IsoFieldFormat do
-  def get_field_format_list(bitmap, msg_type) do
+  def get_field_format_list(bitmap, msg_type, field_format_definition) do
     field_header_type = msg_type[:field_header_type]
 
     bitmap
     |> IsoBitmap.bitmap_to_list()
     # remove first element
     |> Enum.filter(fn a -> a > 1 end)
-    |> get_field_format(field_header_type)
+    |> get_field_format(field_header_type, field_format_definition)
     |> Enum.map(fn {a, b} -> parse_data_element_format(a, b) end)
     |> Enum.sort_by(fn {a, _} -> a end)
   end
 
-  def get_field_format(list_of_bit, format) do
-    DataElementFormat.data_element_format_def(format)
+  # def get_field_format(list_of_bit, format) do
+  #  DataElementFormat.data_element_format_def(format)
+  #  |> Enum.filter(fn {position, _} -> Enum.member?(list_of_bit, position) end)
+  # end
+
+  def get_field_format(list_of_bit, _format, field_format_definition) do
+    field_format_definition
     |> Enum.filter(fn {position, _} -> Enum.member?(list_of_bit, position) end)
   end
 
