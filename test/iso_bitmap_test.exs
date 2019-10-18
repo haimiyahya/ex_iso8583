@@ -1,74 +1,74 @@
-defmodule Ex_Iso8583Test do
+defmodule IsoBitmapTest do
   use ExUnit.Case, async: true
   use ExUnitProperties
   use Bitwise
-  doctest Ex_Iso8583
+  doctest IsoBitmap
 
-  property "fn Ex_Iso8583.list_to_bitmap/1 test => eight_byte_binary_with_first_bit_not_set -> Ex_Iso8583.bitmap_to_list/1 -> Ex_Iso8583.list_to_bitmap/1 === eight_byte_binary_with_first_bit_not_set" do
+  property "fn IsoBitmap.list_to_bitmap/1 test => eight_byte_binary_with_first_bit_not_set -> IsoBitmap.bitmap_to_list/1 -> IsoBitmap.list_to_bitmap/1 === eight_byte_binary_with_first_bit_not_set" do
     check all(bin <- eight_byte_binary_with_first_bit_not_set()) do
       assert bin ==
                bin
-               |> Ex_Iso8583.bitmap_to_list()
-               |> Ex_Iso8583.add_remove_first_field_number()
-               |> Ex_Iso8583.list_of_fields_number_to_bit_list()
-               |> Ex_Iso8583.list_to_bitmap()
+               |> IsoBitmap.bitmap_to_list()
+               |> IsoBitmap.add_remove_first_field_number()
+               |> IsoBitmap.list_of_fields_number_to_bit_list()
+               |> IsoBitmap.list_to_bitmap()
     end
   end
 
-  property "fn Ex_Iso8583.list_to_bitmap/1 test => sixteen_byte_binary_with_first_bit_is_set -> Ex_Iso8583.bitmap_to_list/1 -> Ex_Iso8583.list_to_bitmap/1 === sixteen_byte_binary_with_first_bit_is_set" do
+  property "fn IsoBitmap.list_to_bitmap/1 test => sixteen_byte_binary_with_first_bit_is_set -> IsoBitmap.bitmap_to_list/1 -> IsoBitmap.list_to_bitmap/1 === sixteen_byte_binary_with_first_bit_is_set" do
     check all(bin <- sixteen_byte_binary_with_first_bit_is_set()) do
       assert bin ==
                bin
-               |> Ex_Iso8583.bitmap_to_list()
-               |> Ex_Iso8583.add_remove_first_field_number()
-               |> Ex_Iso8583.list_of_fields_number_to_bit_list()
-               |> Ex_Iso8583.list_to_bitmap()
+               |> IsoBitmap.bitmap_to_list()
+               |> IsoBitmap.add_remove_first_field_number()
+               |> IsoBitmap.list_of_fields_number_to_bit_list()
+               |> IsoBitmap.list_to_bitmap()
     end
   end
 
-  property "fn Ex_Iso8583.bitmap_to_list/1 and list_of_fields_number_to_bit_list/1 test => list_of_integers_between_2_till_64_ordered -> Ex_Iso8583.bitmap_to_list/1 -> Ex_Iso8583.list_to_bitmap/1 === list_of_integers_between_2_till_64_ordered" do
+  property "fn IsoBitmap.bitmap_to_list/1 and list_of_fields_number_to_bit_list/1 test => list_of_integers_between_2_till_64_ordered -> IsoBitmap.bitmap_to_list/1 -> IsoBitmap.list_to_bitmap/1 === list_of_integers_between_2_till_64_ordered" do
     check all(list <- list_of_integers_between_2_till_64_ordered()) do
       assert list ==
                list
-               |> Ex_Iso8583.add_remove_first_field_number()
-               |> Ex_Iso8583.list_of_fields_number_to_bit_list()
-               |> Ex_Iso8583.list_to_bitmap()
-               |> Ex_Iso8583.bitmap_to_list()
+               |> IsoBitmap.add_remove_first_field_number()
+               |> IsoBitmap.list_of_fields_number_to_bit_list()
+               |> IsoBitmap.list_to_bitmap()
+               |> IsoBitmap.bitmap_to_list()
     end
   end
 
-  property "fn Ex_Iso8583.bitmap_to_list/1 and list_of_fields_number_to_bit_list/1 test => list_of_integers_between_2_till_128_ordered -> Ex_Iso8583.bitmap_to_list/1 -> Ex_Iso8583.list_to_bitmap/1 === list_of_integers_between_2_till_128_ordered" do
+  property "fn IsoBitmap.bitmap_to_list/1 and list_of_fields_number_to_bit_list/1 test => list_of_integers_between_2_till_128_ordered -> IsoBitmap.bitmap_to_list/1 -> IsoBitmap.list_to_bitmap/1 === list_of_integers_between_2_till_128_ordered" do
     check all(list <- list_of_integers_between_2_till_128_ordered()) do
       assert list ==
                list
-               |> Ex_Iso8583.add_remove_first_field_number()
-               |> Ex_Iso8583.list_of_fields_number_to_bit_list()
-               |> Ex_Iso8583.list_to_bitmap()
-               |> Ex_Iso8583.bitmap_to_list()
+               |> IsoBitmap.add_remove_first_field_number()
+               |> IsoBitmap.list_of_fields_number_to_bit_list()
+               |> IsoBitmap.list_to_bitmap()
+               |> IsoBitmap.bitmap_to_list()
     end
   end
 
-  property "fn Ex_Iso8583.add_remove_first_field_number/1 test => list_of_integers_between_2_till_64_ordered -> Ex_Iso8583.add_remove_first_field_number/1 === list_of_integers_between_2_till_64_ordered" do
+  property "fn IsoBitmap.add_remove_first_field_number/1 test => list_of_integers_between_2_till_64_ordered -> IsoBitmap.add_remove_first_field_number/1 === list_of_integers_between_2_till_64_ordered" do
     check all(list <- list_of_integers_between_2_till_64_ordered()) do
       assert list ==
                list
-               |> Ex_Iso8583.add_remove_first_field_number()
+               |> IsoBitmap.add_remove_first_field_number()
     end
   end
 
-  property "fn Ex_Iso8583.add_remove_first_field_number/1 test => list_of_integers_between_2_till_128_ordered -> Ex_Iso8583.add_remove_first_field_number/1 === list_of_integers_between_2_till_128_ordered" do
+  property "fn IsoBitmap.add_remove_first_field_number/1 test => list_of_integers_between_2_till_128_ordered -> IsoBitmap.add_remove_first_field_number/1 === list_of_integers_between_2_till_128_ordered" do
     check all(list <- list_of_integers_between_2_till_128_ordered()) do
       assert list ==
                list
-               |> Ex_Iso8583.add_remove_first_field_number()
+               |> IsoBitmap.add_remove_first_field_number()
     end
   end
 
-  property "fn Ex_Iso8583.add_remove_first_field_number/1 test => list_of_integers_between_65_till_128_ordered -> Ex_Iso8583.add_remove_first_field_number/1 === list_of_integers_between_65_till_128_ordered" do
+  property "fn IsoBitmap.add_remove_first_field_number/1 test => list_of_integers_between_65_till_128_ordered -> IsoBitmap.add_remove_first_field_number/1 === list_of_integers_between_65_till_128_ordered" do
     check all(list <- list_of_integers_between_65_till_128_ordered()) do
       assert [1] ++ list ==
                list
-               |> Ex_Iso8583.add_remove_first_field_number()
+               |> IsoBitmap.add_remove_first_field_number()
     end
   end
 
