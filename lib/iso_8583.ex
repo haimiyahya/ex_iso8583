@@ -1,6 +1,6 @@
 defmodule Ex_Iso8583 do
   def extract_iso_msg(iso_msg_without_tpdu, msg_type) do
-    {:ok, bitmap, msg_data} = split_bitmap_and_msg(iso_msg_without_tpdu, msg_type)
+    {:ok, bitmap, msg_data} = IsoBitmap.split_bitmap_and_msg(iso_msg_without_tpdu, msg_type)
 
     field_format_list = get_field_format_list(bitmap, msg_type)
 
@@ -212,64 +212,6 @@ defmodule Ex_Iso8583 do
     <<field_value::binary-size(truncate_length)>> <> _ = field_value
 
     {Map.put_new(accum, position, field_value), data_remaining}
-  end
-
-  def split_bitmap_and_msg(iso_msg_without_tpdu, msg_type)
-      when is_binary(iso_msg_without_tpdu) and byte_size(iso_msg_without_tpdu) > 0 do
-    bitmap_type = msg_type[:bitmap_type]
-
-    iso_msg_without_tpdu
-    |> transform_bitmap(bitmap_type)
-    |> split_bitmap_and_msg_p
-  end
-
-  def split_bitmap_and_msg(_iso_msg_without_tpdu) do
-    {:error, "Invalid Parameter"}
-  end
-
-  def transform_bitmap(iso_msg_without_tpdu, :binary) do
-    iso_msg_without_tpdu
-  end
-
-  def transform_bitmap(iso_msg_without_tpdu, :ascii) do
-    # get the first byte of the bitmap
-    first_byte =
-      :binary.part(iso_msg_without_tpdu, 0, 2)
-      |> Base.decode16!()
-
-    <<first_bit_flag::1, _tail::bitstring>> = first_byte
-
-    bitmap_size =
-      case first_bit_flag do
-        0 -> 8 * 2
-        1 -> 16 * 2
-      end
-
-    <<bitmap::binary-size(bitmap_size), msg_data::bitstring>> = iso_msg_without_tpdu
-
-    Base.decode16!(bitmap) <> msg_data
-  end
-
-  def split_bitmap_and_msg_p(<<1::1, _tail::bitstring>> = iso_msg_without_tpdu) do
-    case byte_size(iso_msg_without_tpdu) > 16 do
-      true ->
-        <<bitmap::binary-size(16), msg_data::bitstring>> = iso_msg_without_tpdu
-        {:ok, bitmap, msg_data}
-
-      false ->
-        {:error, "Invalid Parameter"}
-    end
-  end
-
-  def split_bitmap_and_msg_p(<<0::1, _tail::bitstring>> = iso_msg_without_tpdu) do
-    case byte_size(iso_msg_without_tpdu) > 8 do
-      true ->
-        <<bitmap::binary-size(8), msg_data::bitstring>> = iso_msg_without_tpdu
-        {:ok, bitmap, msg_data}
-
-      false ->
-        {:error, "Invalid Parameter"}
-    end
   end
 
   def get_field_format_list(bitmap, msg_type) do
