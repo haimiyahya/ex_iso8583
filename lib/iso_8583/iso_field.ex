@@ -6,6 +6,7 @@ defmodule IsoField do
   end
 
   def form_field({_position, field_format}, field_value, :ascii) do
+
     header = form_field_header(field_format, field_value, :ascii)
     body = form_field_value(field_format, field_value, :ascii)
     header <> body
@@ -74,6 +75,7 @@ defmodule IsoField do
   end
 
   def form_field_value({_header_size, data_type, max_len} = _field_format, field_value, :ascii) do
+
     case data_type do
       :bcd ->
         field_value |> Util.truncate_string_take_left(max_len) |> Util.sanitize_numeric_string()

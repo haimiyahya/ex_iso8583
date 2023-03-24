@@ -19,10 +19,18 @@ defmodule Ex_Iso8583 do
   end
 
   def form_iso_msg(iso_data, msg_type, field_format_definition) do
-    bitmap = IsoBitmap.create_bitmap(iso_data, msg_type)
+
+    bitmap_type = msg_type[:bitmap_type]
+
+    bitmap = IsoBitmap.create_bitmap(iso_data)
 
     field_format_list =
       IsoFieldFormat.get_field_format_list(bitmap, msg_type, field_format_definition)
+
+    bitmap = case bitmap_type do
+      :ascii -> Base.encode16(bitmap)
+      :binary -> bitmap
+    end
 
     field_data_values =
       Map.to_list(iso_data)

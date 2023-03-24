@@ -1,5 +1,7 @@
 defmodule IsoFieldFormat do
   def get_field_format_list(bitmap, msg_type, field_format_definition) do
+
+
     field_header_type = msg_type[:field_header_type]
 
     bitmap
@@ -22,6 +24,7 @@ defmodule IsoFieldFormat do
   end
 
   def parse_data_element_format(position, format) do
+
     length_header =
       format
       |> (fn a ->
