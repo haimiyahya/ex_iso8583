@@ -1,11 +1,23 @@
 defmodule IsoBitmap do
-  def create_bitmap(iso_data) do
+  def create_bitmap(iso_data, msg_type) do
+    
+    bitmap_type = msg_type[:bitmap_type]
+    
     iso_data
     |> remove_empty_or_nil
     |> Map.keys()
     |> add_remove_first_field_number
     |> list_of_fields_number_to_bit_list
     |> list_to_bitmap
+    |> encode_bitmap(bitmap_type)
+
+  end
+
+	def encode_bitmap(bitmap, encoding) do
+    case encoding do
+      :ascii -> Base.encode16(bitmap)
+      :binary -> bitmap
+    end
   end
 
   def bitmap_to_list(bitmap) do

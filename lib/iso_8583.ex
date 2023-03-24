@@ -19,7 +19,7 @@ defmodule Ex_Iso8583 do
   end
 
   def form_iso_msg(iso_data, msg_type, field_format_definition) do
-    bitmap = IsoBitmap.create_bitmap(iso_data)
+    bitmap = IsoBitmap.create_bitmap(iso_data, msg_type)
 
     field_format_list =
       IsoFieldFormat.get_field_format_list(bitmap, msg_type, field_format_definition)

@@ -149,4 +149,21 @@ defmodule MsgTest do
 
     assert iso_data == Ex_Iso8583.extract_iso_msg(raw_msg, config, @data_element_format_bcd)
   end
+
+  test "form a message with ascii bmp" do
+    msg = %{
+      7 => "0323160024",
+      11 => "000451",
+      70 => "301"
+    }
+
+    header_config = [bitmap_type: :ascii, field_header_type: :ascii]
+
+    txn_bytes = Ex_Iso8583.form_iso_msg(msg, header_config, @data_element_format_bcd)
+
+    raw_message = "ISO025000077" <> "0800" <> txn_bytes
+    msg_size = byte_size(raw_message)
+
+    IO.inspect(raw_message, limit: :infinity)
+  end
 end
