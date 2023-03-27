@@ -53,10 +53,10 @@ defmodule MsgTest do
     49 => "a or n 3",
     50 => "a or n 3",
     51 => "a or n 3",
-    52 => "b 8",
+    52 => "b 64",
     53 => "n 16",
     54 => "an ...120",
-    55 => "ans ...999b",
+    55 => "b ...9999",
     56 => "ans ...999",
     57 => "ans ...999",
     58 => "ans ...999",
@@ -65,7 +65,7 @@ defmodule MsgTest do
     61 => "ans ...999",
     62 => "ans ...999",
     63 => "ans ...999",
-    64 => "b 16",
+    64 => "ans 16",
     65 => "b 1",
     66 => "n 1",
     67 => "n 2",
@@ -166,4 +166,32 @@ defmodule MsgTest do
 
     IO.inspect(raw_message, limit: :infinity)
   end
+
+  test "form a sale message" do
+    sale_txn_sample = %{
+      3 => "000000",
+      4 => "000000000500",
+      11 => "000120",
+      22 => "261",
+      23 => "000",
+      24 => "550",
+      25 => "00",
+      35 => "5463410004521533D30052230000001103400",
+      41 => "50472359",
+      42 => "501100377530001",
+      52 => Base.decode16!("38382957384F8146"),
+      55 =>
+        Base.decode16!(
+          "5F2A020458820218008407A0000005410002950580000480009A032009229C01009F02060000000005009F03060000000000009F10200FA505A201C1000000000000000000000F0000000000000000000000000000009F1A0204589F2608C47A2032A2F170A09F2701809F34030203009F360200769F37045B181CF49F770201009B0268009F420207029F4401025F28020702"
+        ),
+      62 => "000165",
+      64 => Base.decode16!("6E674BA362DEA886")
+    }
+
+    config = [bitmap_type: :binary, field_header_type: :bcd]
+    raw_msg = Ex_Iso8583.form_iso_msg(sale_txn_sample, config, @data_element_format_bcd)
+
+    #assert iso_data == Ex_Iso8583.extract_iso_msg(raw_msg, config, @data_element_format_bcd)
+  end
+
 end

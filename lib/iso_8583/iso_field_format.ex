@@ -50,6 +50,12 @@ defmodule IsoFieldFormat do
       end
 
     data_type =
+        case data_type == nil and Regex.match?(~r/z/, format) do
+          true -> :hex
+          false -> data_type
+        end
+
+    data_type =
       case data_type == nil and Regex.match?(~r/b/, format) do
         true -> :binary
         false -> data_type

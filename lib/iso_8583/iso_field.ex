@@ -1,5 +1,7 @@
 defmodule IsoField do
-  def form_field({_position, field_format}, field_value, :bcd) do
+
+  def form_field({position, field_format}, field_value, :bcd) do
+
     header = form_field_header(field_format, field_value, :bcd)
     body = form_field_value(field_format, field_value, :bcd)
     header <> body
@@ -17,14 +19,20 @@ defmodule IsoField do
   end
 
   def form_field_header({header_size, data_type, _max_len} = _field_format, field_value, :bcd) do
+
     size =
       case data_type do
         :bcd ->
           div(byte_size(field_value), 2)
 
+        :hex ->
+          div(byte_size(field_value), 2)
+
         :ascii ->
           byte_size(field_value)
-          # todo: put the binary handler here
+
+        :binary ->
+          byte_size(field_value)
       end
 
     header =
@@ -61,6 +69,12 @@ defmodule IsoField do
         |> Util.pad_left_string_if_odd_length("0")
         |> Base.decode16!()
 
+      :hex ->
+        field_value
+        |> Util.truncate_string_take_left(max_len)
+        |> Util.pad_left_string_if_odd_length("0")
+        |> Base.decode16!()
+
       :ascii ->
         field_value
         |> Util.truncate_string_take_left(max_len)
@@ -68,9 +82,7 @@ defmodule IsoField do
 
       :binary ->
         field_value
-        |> Util.truncate_string_take_left(max_len)
-        |> Util.pad_left_string_if_odd_length("0")
-        |> Base.decode16!()
+
     end
   end
 
@@ -104,6 +116,7 @@ defmodule IsoField do
     {:ok, field_length} =
       case data_type do
         :bcd -> Util.get_bcd_length(max_length)
+        :hex -> Util.get_bcd_length(max_length)
         :ascii -> {:ok, max_length}
         :binary -> Util.get_bcd_length(max_length)
       end
@@ -113,6 +126,7 @@ defmodule IsoField do
     field_value =
       case data_type do
         :bcd -> Util.convert_bin_to_hex(field_value) |> (fn {:ok, val} -> val end).()
+        :hex -> Util.convert_bin_to_hex(field_value) |> (fn {:ok, val} -> val end).()
         :ascii -> field_value
         :binary -> Util.convert_bin_to_hex(field_value) |> (fn {:ok, val} -> val end).()
       end
