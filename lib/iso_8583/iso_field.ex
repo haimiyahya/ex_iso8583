@@ -34,6 +34,9 @@ defmodule IsoField do
 
         :binary ->
           byte_size(field_value)
+
+        :z ->
+          byte_size(field_value)*2
       end
 
     header =
@@ -78,6 +81,9 @@ defmodule IsoField do
         |> Util.check_if_required_pad_left(header_size, data_type, max_len)
 
       :binary ->
+        field_value
+
+      :z ->
         field_value
 
     end

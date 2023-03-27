@@ -190,6 +190,8 @@ defmodule MsgTest do
     config = [bitmap_type: :binary, field_header_type: :bcd]
     raw_msg = Ex_Iso8583.form_iso_msg(sale_txn_sample, config, @data_element_format_bcd)
 
+    IO.inspect(raw_msg, limit: :infinity)
+
     #assert iso_data == Ex_Iso8583.extract_iso_msg(raw_msg, config, @data_element_format_bcd)
   end
 
