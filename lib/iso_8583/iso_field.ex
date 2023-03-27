@@ -4,6 +4,7 @@ defmodule IsoField do
 
     header = form_field_header(field_format, field_value, :bcd)
     body = form_field_value(field_format, field_value, :bcd)
+
     header <> body
   end
 
@@ -40,7 +41,6 @@ defmodule IsoField do
       |> Util.pad_left_string(header_size, "0")
       |> Util.pad_left_string_if_odd_length("0")
       |> Base.decode16!()
-
     header
   end
 
@@ -71,9 +71,6 @@ defmodule IsoField do
 
       :hex ->
         field_value
-        |> Util.truncate_string_take_left(max_len)
-        |> Util.pad_left_string_if_odd_length("0")
-        |> Base.decode16!()
 
       :ascii ->
         field_value

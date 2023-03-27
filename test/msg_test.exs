@@ -164,7 +164,6 @@ defmodule MsgTest do
     raw_message = "ISO025000077" <> "0800" <> txn_bytes
     msg_size = byte_size(raw_message)
 
-    IO.inspect(raw_message, limit: :infinity)
   end
 
   test "form a sale message" do
@@ -176,7 +175,7 @@ defmodule MsgTest do
       23 => "000",
       24 => "550",
       25 => "00",
-      35 => "5463410004521533D30052230000001103400",
+      35 => Base.decode16!("5463410004521533D300522300000011034000"),
       41 => "50472359",
       42 => "501100377530001",
       52 => Base.decode16!("38382957384F8146"),
