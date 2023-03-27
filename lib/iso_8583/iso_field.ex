@@ -19,7 +19,7 @@ defmodule IsoField do
     <<>>
   end
 
-  def form_field_header({header_size, data_type, _max_len} = _field_format, field_value, :bcd) do
+  def form_field_header({header_size, data_type, max_len} = _field_format, field_value, :bcd) do
 
     size =
       case data_type do
@@ -36,8 +36,15 @@ defmodule IsoField do
           byte_size(field_value)
 
         :z ->
-          byte_size(field_value)*2
+          cond do
+            byte_size(field_value)*2 > max_len -> max_len
+            true -> byte_size(field_value)*2
+          end
       end
+
+    #size = if max_len > 0 and size > max_len do
+    #  max_len
+    #end
 
     header =
       Integer.to_string(size)
