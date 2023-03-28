@@ -106,6 +106,10 @@ defmodule IsoField do
         field_value
         |> Util.truncate_string_take_left(max_len)
 
+      :z ->
+        field_value
+        |> Util.truncate_string_take_left(max_len)
+
       :binary ->
         field_value
         |> Util.truncate_string_take_left(max_len)
@@ -115,14 +119,17 @@ defmodule IsoField do
   end
 
   def extract_field({position, {0, _data_type, max_length}}, {accum, iso_msg}, :ascii) do
+
     field_length = max_length
     <<field_value::binary-size(field_length)>> <> data_remaining = iso_msg
+
     field_value = field_value |> Util.truncate_string(max_length)
 
     {Map.put_new(accum, position, field_value), data_remaining}
   end
 
   def extract_field({position, {0, data_type, max_length}}, {accum, iso_msg}, :bcd) do
+
     {:ok, field_length} =
       case data_type do
         :bcd -> Util.get_bcd_length(max_length)
@@ -147,7 +154,9 @@ defmodule IsoField do
   end
 
   def extract_field({position, {length_header, _data_type, max_length}}, {accum, iso_msg}, :ascii) do
+
     <<field_size::binary-size(length_header)>> <> data_remaining1 = iso_msg
+
     {field_sz, _} = field_size |> Integer.parse()
 
     <<field_value::binary-size(field_sz)>> <> data_remaining = data_remaining1

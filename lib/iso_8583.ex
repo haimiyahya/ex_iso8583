@@ -8,6 +8,7 @@ defmodule Ex_Iso8583 do
     {fields, _} =
       field_format_list
       |> Enum.reduce({%{}, msg_data}, fn {position, field_format}, {accum, msg_data2} ->
+
         IsoField.extract_field(
           {position, field_format},
           {accum, msg_data2},
