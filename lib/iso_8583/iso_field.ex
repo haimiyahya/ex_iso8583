@@ -187,6 +187,7 @@ defmodule IsoField do
         :bcd -> Util.get_bcd_length(field_sz)
         :ascii -> {:ok, field_sz}
         :binary -> {:ok, field_sz}
+        :z -> {:ok, Util.make_even(field_sz)/2}
       end
 
     <<field_value::binary-size(field_sz)>> <> data_remaining = data_remaining1
@@ -196,11 +197,13 @@ defmodule IsoField do
         :bcd -> Util.convert_bin_to_hex(field_value)
         :ascii -> {:ok, field_value}
         :binary -> Util.convert_bin_to_hex(field_value)
+        :z -> Util.convert_bin_to_hex(field_value)
       end
 
     truncate_length =
       cond do
         field_sz > max_length -> max_length
+        String.length(field_value) > field_sz -> field_sz # for f35, length specified is 37 but it stored as 19 bytes so have to truncate
         true -> field_sz
       end
 
