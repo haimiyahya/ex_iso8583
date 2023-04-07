@@ -88,10 +88,15 @@ defmodule IsoField do
         |> Util.check_if_required_pad_left(header_size, data_type, max_len)
 
       :binary ->
-        field_value
+
+        bin_length = trunc(max_len/8)
+        String.slice(field_value, 0, bin_length)
 
       :z ->
         field_value
+        |> Util.truncate_string_take_left(max_len)
+        |> Util.pad_right_string_if_odd_length("0")
+        |> Base.decode16!()
 
     end
   end
@@ -135,17 +140,17 @@ defmodule IsoField do
         :bcd -> Util.get_bcd_length(max_length)
         :hex -> Util.get_bcd_length(max_length)
         :ascii -> {:ok, max_length}
-        :binary -> Util.get_bcd_length(max_length)
+        :binary -> {:ok, trunc(max_length/8)}
+        :z -> Util.get_bcd_length(max_length)
       end
 
     <<field_value::binary-size(field_length)>> <> data_remaining = iso_msg
-
     field_value =
       case data_type do
         :bcd -> Util.convert_bin_to_hex(field_value) |> (fn {:ok, val} -> val end).()
         :hex -> Util.convert_bin_to_hex(field_value) |> (fn {:ok, val} -> val end).()
         :ascii -> field_value
-        :binary -> Util.convert_bin_to_hex(field_value) |> (fn {:ok, val} -> val end).()
+        :binary -> field_value
       end
 
     field_value = field_value |> Util.truncate_string(max_length)
@@ -196,7 +201,6 @@ defmodule IsoField do
         :binary -> Util.convert_bin_to_hex(field_value)
         :z -> Util.convert_bin_to_hex(field_value)
       end
-
     truncate_length =
       cond do
         field_sz > max_length -> max_length

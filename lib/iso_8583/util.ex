@@ -57,6 +57,13 @@ defmodule Util do
     end
   end
 
+  def pad_right_string_if_odd_length(field_value, padding_char) do
+    case rem(String.length(field_value), 2) > 0 do
+      true -> field_value <> padding_char
+      false -> field_value
+    end
+  end
+
   def sanitize_and_convert_string_to_int(field_value) do
     {int_val, _} =
       field_value
