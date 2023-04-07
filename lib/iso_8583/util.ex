@@ -67,7 +67,7 @@ defmodule Util do
   end
 
   def get_bcd_length(length) do
-    case is_integer(length) and length > 1 do
+    case is_integer(length) and length > 0 do
       true -> {:ok, div(make_even(length), 2)}
       false -> {:error, "Invalid Parameter"}
     end

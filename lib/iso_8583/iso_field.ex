@@ -1,6 +1,6 @@
 defmodule IsoField do
 
-  def form_field({position, field_format}, field_value, :bcd) do
+  def form_field({_position, field_format}, field_value, :bcd) do
 
     header = form_field_header(field_format, field_value, :bcd)
     body = form_field_value(field_format, field_value, :bcd)
@@ -173,24 +173,21 @@ defmodule IsoField do
   end
 
   def extract_field({position, {length_header, data_type, max_length}}, {accum, iso_msg}, :bcd) do
-    length_header =
-      length_header
-      |> div(2)
-      |> Util.make_even()
 
+    length_header = determine_header_binary_size(length_header)
     <<field_size::binary-size(length_header)>> <> data_remaining1 = iso_msg
 
     {field_sz, _} = field_size |> Base.encode16() |> Integer.parse()
 
-    {:ok, field_sz} =
+    {:ok, field_sz_binary} =
       case data_type do
         :bcd -> Util.get_bcd_length(field_sz)
         :ascii -> {:ok, field_sz}
         :binary -> {:ok, field_sz}
-        :z -> {:ok, Util.make_even(field_sz)/2}
+        :z -> {:ok, trunc(Util.make_even(field_sz)/2)}
       end
 
-    <<field_value::binary-size(field_sz)>> <> data_remaining = data_remaining1
+    <<field_value::binary-size(field_sz_binary)>> <> data_remaining = data_remaining1
 
     {:ok, field_value} =
       case data_type do
@@ -211,4 +208,9 @@ defmodule IsoField do
 
     {Map.put_new(accum, position, field_value), data_remaining}
   end
+
+  def determine_header_binary_size(length_header) do
+    div(length_header + rem(length_header, 2), 2)
+  end
+
 end
