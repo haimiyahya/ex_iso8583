@@ -88,8 +88,12 @@ defmodule IsoField do
         |> Util.check_if_required_pad_left(header_size, data_type, max_len)
 
       :binary ->
-        bin_length = trunc(max_len/8)
-        String.slice(field_value, 0, bin_length)
+        bin_length =
+          case byte_size(field_value) > trunc(max_len/8) do
+            true -> trunc(max_len/8)
+            false -> byte_size(field_value)
+          end
+        binary_part(field_value, 0, bin_length)
 
       :z ->
         field_value
