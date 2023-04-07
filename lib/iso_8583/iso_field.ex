@@ -93,6 +93,7 @@ defmodule IsoField do
             true -> trunc(max_len/8)
             false -> byte_size(field_value)
           end
+
         binary_part(field_value, 0, bin_length)
 
       :z ->
@@ -201,7 +202,7 @@ defmodule IsoField do
       case data_type do
         :bcd -> Util.convert_bin_to_hex(field_value)
         :ascii -> {:ok, field_value}
-        :binary -> Util.convert_bin_to_hex(field_value)
+        :binary -> {:ok, field_value}
         :z -> Util.convert_bin_to_hex(field_value)
       end
     truncate_length =
