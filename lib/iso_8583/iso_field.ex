@@ -24,7 +24,7 @@ defmodule IsoField do
     size =
       case data_type do
         :bcd ->
-          div(byte_size(field_value), 2)
+          byte_size(field_value) * 2
 
         :hex ->
           div(byte_size(field_value), 2)
@@ -51,6 +51,7 @@ defmodule IsoField do
       |> Util.pad_left_string(header_size, "0")
       |> Util.pad_left_string_if_odd_length("0")
       |> Base.decode16!()
+
     header
   end
 
@@ -205,6 +206,7 @@ defmodule IsoField do
         :binary -> {:ok, field_value}
         :z -> Util.convert_bin_to_hex(field_value)
       end
+
     truncate_length =
       cond do
         field_sz > max_length -> max_length
@@ -213,7 +215,6 @@ defmodule IsoField do
       end
 
     <<field_value::binary-size(truncate_length)>> <> _ = field_value
-
     {Map.put_new(accum, position, field_value), data_remaining}
   end
 
