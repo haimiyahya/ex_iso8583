@@ -24,7 +24,7 @@ defmodule IsoField do
     size =
       case data_type do
         :bcd ->
-          byte_size(field_value) * 2
+          byte_size(field_value)
 
         :hex ->
           div(byte_size(field_value), 2)
