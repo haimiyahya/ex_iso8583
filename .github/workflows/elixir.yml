@@ -1,0 +1,12 @@
+name: hello-world
+on: push
+jobs:
+  my-job:
+    runs-on: windows-latest
+    steps:
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: '24'
+          elixir-version: '1.14.4'
+      - run: echo "hello, world"
