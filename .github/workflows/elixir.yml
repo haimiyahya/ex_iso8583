@@ -9,4 +9,4 @@ jobs:
         with:
           otp-version: '24'
           elixir-version: '1.14.4'
-      - run: echo "hello, world"
+      - run: mix test
