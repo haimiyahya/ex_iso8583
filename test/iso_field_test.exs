@@ -4,6 +4,8 @@ defmodule IsoFieldTest do
 
   require Integer
 
+
+
   property "extract_field - bcd header - track 2" do
 
     data_type = :z

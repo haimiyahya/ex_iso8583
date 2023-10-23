@@ -37,8 +37,8 @@ defmodule IsoField do
 
         :z ->
           cond do
-            byte_size(field_value)*2 > max_len -> max_len
-            true -> byte_size(field_value)*2
+            byte_size(field_value) > max_len -> max_len
+            true -> byte_size(field_value)
           end
       end
 
