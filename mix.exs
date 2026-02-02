@@ -4,7 +4,7 @@ defmodule Iso8583.MixProject do
   def project do
     [
       app: :ex_iso8583,
-      version: "0.3.2",
+      version: "0.4.0",
       elixir: "~> 1.9",
       start_permanent: Mix.env() == :prod,
       deps: deps()

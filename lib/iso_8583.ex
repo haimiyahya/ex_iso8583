@@ -22,7 +22,11 @@ defmodule Ex_Iso8583 do
   """
 
   @type field_format_definition :: %{pos_integer() => String.t() | map()}
-  @type msg_type :: %{bitmap_type: :binary | :ascii, field_header_type: atom()}
+  @type msg_type :: %{bitmap_type: :binary | :ascii, field_header_type: :bcd | :ascii}
+  @type iso_data :: %{pos_integer() => String.t()}
+  @type iso_message :: binary()
+  @type field_number :: pos_integer()
+  @type field_value :: String.t()
 
   alias Ex_Iso8583.Errors
 
@@ -42,6 +46,7 @@ defmodule Ex_Iso8583 do
     * `Errors.BitmapError` - if the bitmap cannot be parsed
     * `Errors.MessageLengthError` - if message length is invalid
   """
+  @spec extract_iso_msg(iso_message(), msg_type(), field_format_definition()) :: iso_data()
   def extract_iso_msg(iso_msg_without_tpdu, msg_type, field_format_definition) do
     {:ok, bitmap, msg_data} = IsoBitmap.split_bitmap_and_msg(iso_msg_without_tpdu, msg_type)
 
@@ -88,6 +93,7 @@ defmodule Ex_Iso8583 do
     * `Errors.UndefinedFieldError` - if a field in iso_data is not defined in field_format_definition
     * `Errors.InvalidFieldValueError` - if a field value doesn't match its format
   """
+  @spec form_iso_msg(iso_data(), msg_type(), field_format_definition()) :: iso_message()
   def form_iso_msg(iso_data, msg_type, field_format_definition) do
     # Validate that all fields in iso_data have format definitions
     defined_field_numbers = Map.keys(field_format_definition)
