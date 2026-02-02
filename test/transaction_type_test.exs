@@ -121,7 +121,7 @@ defmodule TransactionTypeTest do
 
       iso_msg = Ex_Iso8583.form_iso_msg(data, @msg_type, @field_format)
 
-      assert {:error, {:missing_fields, missing}} =
+      assert {:error, {:missing_fields, "0100", "000000", missing}} =
         AuthRequest.parse_and_validate(iso_msg, @msg_type, @field_format)
 
       assert :pan in missing
@@ -184,7 +184,7 @@ defmodule TransactionTypeTest do
 
       iso_msg = Ex_Iso8583.form_iso_msg(data, @msg_type, @field_format)
 
-      assert {:error, {:extra_fields, extra}} =
+      assert {:error, {:extra_fields, "0100", "000000", extra}} =
         StrictAuthRequest.parse_and_validate(iso_msg, @msg_type, @field_format, strict: true)
 
       # The extra field is the currency_code
@@ -244,7 +244,7 @@ defmodule TransactionTypeTest do
         42 => "123456789012345"
       }
 
-      assert {:ok, txn} = AuthRequest.validate_and_create(field_data, "00")
+      assert {:ok, txn} = AuthRequest.validate_and_create(field_data, "0100", "000000")
 
       assert %AuthRequest{} = txn
       assert txn.pan == "1234567890123456789"
@@ -261,7 +261,7 @@ defmodule TransactionTypeTest do
         42 => "123456789012345"
       }
 
-      assert {:ok, txn} = AuthRequest.validate_and_create(field_data, "01")
+      assert {:ok, txn} = AuthRequest.validate_and_create(field_data, "0100", "010000")
 
       assert %AuthRequest{} = txn
       assert txn.processing_code == "010000"
@@ -275,8 +275,8 @@ defmodule TransactionTypeTest do
         # Missing stan, terminal_id, merchant_id
       }
 
-      assert {:error, {:missing_fields, missing}} =
-        AuthRequest.validate_and_create(field_data, "00")
+      assert {:error, {:missing_fields, "0100", "000000", missing}} =
+        AuthRequest.validate_and_create(field_data, "0100", "000000")
 
       assert :stan in missing
       assert :terminal_id in missing
@@ -526,6 +526,106 @@ defmodule TransactionTypeTest do
 
       # Wildcard fallback
       assert {:ok, WildcardPattern} = TransactionType.find_transaction_type(modules, "0200", "999999")
+    end
+  end
+
+  describe "compile-time validation" do
+    test "raises compile error when mandatory fields not in fields mapping" do
+      code = """
+      defmodule BadMandatoryFields do
+        use Ex_Iso8583.TransactionType
+
+        defstruct [:pan, :amount, :stan]
+
+        transaction_type "0100" do
+          fields %{
+            pan: 2,
+            amount: 4
+          }
+
+          mandatory [:pan, :stan]  # stan not in fields mapping!
+        end
+      end
+      """
+
+      assert_raise CompileError, ~r/Fields in `mandatory` but not defined in `fields` mapping/, fn ->
+        Code.compile_string(code)
+      end
+    end
+
+    test "raises compile error when optional fields not in fields mapping" do
+      code = """
+      defmodule BadOptionalFields do
+        use Ex_Iso8583.TransactionType
+
+        defstruct [:pan, :amount, :stan]
+
+        transaction_type "0100" do
+          fields %{
+            pan: 2,
+            amount: 4
+          }
+
+          mandatory [:pan]
+          optional [:stan]  # stan not in fields mapping!
+        end
+      end
+      """
+
+      assert_raise CompileError, ~r/Fields in `optional` but not defined in `fields` mapping/, fn ->
+        Code.compile_string(code)
+      end
+    end
+
+    test "raises compile error when fields overlap in mandatory and optional" do
+      code = """
+      defmodule OverlappingFields do
+        use Ex_Iso8583.TransactionType
+
+        defstruct [:pan, :amount]
+
+        transaction_type "0100" do
+          fields %{
+            pan: 2,
+            amount: 4
+          }
+
+          mandatory [:pan]
+          optional [:pan, :amount]  # pan in both!
+        end
+      end
+      """
+
+      assert_raise CompileError, ~r/Fields defined in both `mandatory` and `optional`/, fn ->
+        Code.compile_string(code)
+      end
+    end
+
+    test "compiles successfully with valid configuration" do
+      code = """
+      defmodule ValidTransactionType do
+        use Ex_Iso8583.TransactionType
+
+        defstruct [:pan, :amount, :stan, :terminal_id]
+
+        transaction_type "0100" do
+          fields %{
+            pan: 2,
+            amount: 4,
+            stan: 11,
+            terminal_id: 41
+          }
+
+          mandatory [:pan, :amount]
+          optional [:stan, :terminal_id]
+        end
+      end
+      """
+
+      # Code.compile_string/2 returns [{module_name, binary}]
+      assert [{ValidTransactionType, _binary}] = Code.compile_string(code)
+      assert ValidTransactionType.mti() == "0100"
+      assert ValidTransactionType.field_mapping() == %{pan: 2, amount: 4, stan: 11, terminal_id: 41}
     end
   end
 end

@@ -133,6 +133,9 @@ defmodule Ex_Iso8583.TransactionType do
 
     {mti, proc_code_pattern, fields, mandatory, optional} = build_config(config)
 
+    # Compile-time validation
+    validate_compile_time!(env.module, fields, mandatory, optional)
+
     quote do
       @mti unquote(macro_escape(mti))
       @processing_code_pattern unquote(macro_escape(proc_code_pattern))
@@ -199,10 +202,11 @@ defmodule Ex_Iso8583.TransactionType do
 
       Returns `{:ok, struct}` if valid, `{:error, reason}` if validation fails.
       """
-      def validate_and_create(field_data, processing_code, opts \\ []) do
+      def validate_and_create(field_data, mti, processing_code, opts \\ []) do
         Ex_Iso8583.TransactionType.validate_and_create(
           __MODULE__,
           field_data,
+          mti,
           processing_code,
           opts
         )
@@ -243,6 +247,52 @@ defmodule Ex_Iso8583.TransactionType do
   defp macro_escape(nil), do: nil
   defp macro_escape(term), do: Macro.escape(term)
 
+  # Compile-time validation for transaction type definitions
+  defp validate_compile_time!(_module, fields, mandatory, optional) do
+    field_keys = Map.keys(fields)
+
+    # Validate 1: All mandatory fields must exist in fields mapping
+    invalid_mandatory = mandatory -- field_keys
+    if invalid_mandatory != [] do
+      raise CompileError,
+        description: """
+        [Ex_Iso8583.TransactionType] Fields in `mandatory` but not defined in `fields` mapping:
+
+            #{inspect(invalid_mandatory)}
+
+        Please add these fields to the fields mapping, or remove them from mandatory.
+        """
+    end
+
+    # Validate 2: All optional fields must exist in fields mapping
+    invalid_optional = optional -- field_keys
+    if invalid_optional != [] do
+      raise CompileError,
+        description: """
+        [Ex_Iso8583.TransactionType] Fields in `optional` but not defined in `fields` mapping:
+
+            #{inspect(invalid_optional)}
+
+        Please add these fields to the fields mapping, or remove them from optional.
+        """
+    end
+
+    # Validate 3: mandatory and optional should not overlap
+    overlap = MapSet.new(mandatory) |> MapSet.intersection(MapSet.new(optional)) |> MapSet.to_list()
+    if overlap != [] do
+      raise CompileError,
+        description: """
+        [Ex_Iso8583.TransactionType] Fields defined in both `mandatory` and `optional`:
+
+            #{inspect(overlap)}
+
+        A field can be either mandatory or optional, not both.
+        """
+    end
+
+    :ok
+  end
+
   @doc """
   Parses and validates an ISO 8583 binary message.
 
@@ -252,8 +302,11 @@ defmodule Ex_Iso8583.TransactionType do
     # extract_iso_msg returns the field map directly, not {:ok, field_data}
     try do
       field_data = Ex_Iso8583.extract_iso_msg(iso_msg, msg_type, field_format)
+      # MTI is NOT included in field_data - it's a separate part of the ISO message
+      # The module's MTI should be used since we're calling this on a specific module
+      mti = module.mti()
       processing_code = Map.get(field_data, 3, "00")
-      validate_and_create(module, field_data, processing_code, opts)
+      validate_and_create(module, field_data, mti, processing_code, opts)
     rescue
       e -> {:error, Exception.message(e)}
     end
@@ -264,11 +317,11 @@ defmodule Ex_Iso8583.TransactionType do
 
   Returns `{:ok, struct}` if valid, `{:error, reason}` if validation fails.
   """
-  def validate_and_create(module, field_data, processing_code, opts \\ []) do
+  def validate_and_create(module, field_data, mti, processing_code, opts \\ []) do
     # Check if this module matches the processing code
     pattern = module.processing_code_pattern()
     unless matches_pattern?(pattern, processing_code) do
-      {:error, {:processing_code_mismatch, pattern, processing_code}}
+      {:error, {:processing_code_mismatch, mti, pattern, processing_code}}
     end
 
     field_mapping = module.field_mapping()
@@ -282,11 +335,11 @@ defmodule Ex_Iso8583.TransactionType do
     missing_fields = check_mandatory_fields(field_data, field_mapping, mandatory)
 
     if missing_fields != [] do
-      {:error, {:missing_fields, missing_fields}}
+      {:error, {:missing_fields, mti, processing_code, missing_fields}}
     else
       # Build the struct with allowed fields only
       allowed = MapSet.new(mandatory ++ optional)
-      create_struct(module, field_data, field_mapping, allowed, strict)
+      create_struct(module, field_data, field_mapping, allowed, strict, mti, processing_code)
     end
   end
 
@@ -301,7 +354,7 @@ defmodule Ex_Iso8583.TransactionType do
     end)
   end
 
-  defp create_struct(module, field_data, field_mapping, allowed_fields, strict) do
+  defp create_struct(module, field_data, field_mapping, allowed_fields, strict, mti, processing_code) do
     # Build struct from field_data using field_mapping
     struct_data =
       Enum.reduce(field_mapping, %{}, fn {field_name, iso_field_num}, acc ->
@@ -327,7 +380,7 @@ defmodule Ex_Iso8583.TransactionType do
       extra = Enum.filter(present_in_message, &(&1 not in allowed_fields))
 
       if extra != [] do
-        {:error, {:extra_fields, extra}}
+        {:error, {:extra_fields, mti, processing_code, extra}}
       else
         {:ok, struct(module, struct_data)}
       end
@@ -467,33 +520,65 @@ defmodule Ex_Iso8583.TransactionType do
   Takes a list of transaction type modules and automatically finds the
   one that matches the MTI and processing code.
 
-  Returns `{:ok, struct}` if valid, `{:error, reason}` if validation fails
-  or no matching transaction type is found.
+  ## Returns
+    - `{:ok, struct}` - Successfully parsed and validated
+    - `{:error, {:no_matching_transaction_type, mti, processing_code}}` - No matching transaction type
+    - `{:error, {:missing_fields, mti, processing_code, field_names}}` - Required fields missing
+    - `{:error, {:extra_fields, mti, processing_code, field_names}}` - Extra fields present (strict mode)
+    - `{:error, {:processing_code_mismatch, mti, pattern, processing_code}}` - Internal: pattern mismatch
+    - `{:error, message}` - Other errors
 
   ## Examples
       modules = [AuthRequestPurchase, AuthRequestCashAdvance]
 
       case find_and_parse(modules, iso_msg, msg_type, field_format) do
         {:ok, txn} -> # handle success
-        {:error, :no_match} -> # no transaction type matched
-        {:error, reason} -> # other validation error
+        {:error, {:no_matching_transaction_type, mti, proc_code}} -> # no match
+        {:error, {:missing_fields, mti, proc_code, fields}} -> # missing fields
+        {:error, reason} -> # other error
       end
   """
   def find_and_parse(modules, iso_msg, msg_type, field_format, opts \\ []) do
     try do
+      # Extract MTI from the beginning of the message (first 4 bytes)
+      {mti, _msg_without_mti} = extract_mti(iso_msg, msg_type)
+
       field_data = Ex_Iso8583.extract_iso_msg(iso_msg, msg_type, field_format)
-      mti = Map.get(field_data, 0)
       processing_code = Map.get(field_data, 3, "000000")
 
       case find_transaction_type(modules, mti, processing_code) do
         {:ok, module} ->
-          validate_and_create(module, field_data, processing_code, opts)
+          validate_and_create(module, field_data, mti, processing_code, opts)
 
         {:error, :no_match} ->
           {:error, {:no_matching_transaction_type, mti, processing_code}}
       end
     rescue
       e -> {:error, Exception.message(e)}
+    end
+  end
+
+  # Extract MTI (Message Type Indicator) from the beginning of the ISO message
+  # MTI is typically the first 4 bytes (ASCII) or 2 bytes (BCCD)
+  defp extract_mti(iso_msg, _msg_type) do
+    # Try ASCII MTI first (4 bytes)
+    if byte_size(iso_msg) >= 4 do
+      mti_bytes = binary_part(iso_msg, 0, 4)
+      # Check if it looks like a numeric ASCII MTI
+      if String.printable?(mti_bytes) and String.match?(mti_bytes, ~r/^\d+$/) do
+        {mti_bytes, binary_part(iso_msg, 4, byte_size(iso_msg) - 4)}
+      else
+        # Try BCD (2 bytes) - convert each nibble to ASCII
+        if byte_size(iso_msg) >= 2 do
+          <<a::4, b::4, c::4, d::4>> = iso_msg
+          mti = <<(a + ?0), (b + ?0), (c + ?0), (d + ?0)>>
+          {mti, binary_part(iso_msg, 2, byte_size(iso_msg) - 2)}
+        else
+          {"0000", iso_msg}  # Default fallback
+        end
+      end
+    else
+      {"0000", iso_msg}  # Default fallback
     end
   end
 end
