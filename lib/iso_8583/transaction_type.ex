@@ -50,14 +50,7 @@ defmodule Ex_Iso8583.TransactionType do
 
   defmacro __using__(_opts) do
     quote do
-      import Ex_Iso8583.TransactionType,
-        only: [
-          transaction_type: 2,
-          fields: 1,
-          mandatory: 1,
-          optional: 1,
-          processing_code: 2
-        ]
+      import Ex_Iso8583.TransactionType
 
       Module.register_attribute(__MODULE__, :txn_config, accumulate: true)
       @before_compile Ex_Iso8583.TransactionType
@@ -65,11 +58,44 @@ defmodule Ex_Iso8583.TransactionType do
   end
 
   @doc """
-  Defines a transaction type for a specific MTI.
+  Defines a transaction type for a specific MTI and optional processing code pattern.
+
+  ## Options
+    - `:processing_code` - Processing code pattern for matching. Supports:
+      - Exact match: `"020000"` matches only "020000"
+      - Prefix wildcard: `"01*"` matches "010000", "011234", etc.
+      - Suffix wildcard: `"*1000"` matches "001000", "021000", etc.
+      - Full wildcard: `"*"` matches all processing codes (default)
+
+  ## Examples
+      transaction_type "0100" do
+        fields %{pan: 2, amount: 4}
+        mandatory [:pan, :amount]
+      end
+
+      transaction_type "0100", processing_code: "00*" do
+        fields %{pan: 2, amount: 4}
+        mandatory [:pan, :amount]
+      end
   """
-  defmacro transaction_type(mti, [{:do, block}]) do
+  # Handle with processing_code option and do block: transaction_type "0100", processing_code: "00*" do
+  # Elixir parses this as: transaction_type("0100", processing_code: "00*", do: ...)
+  # Which is 3 args: mti, keyword list, and do block
+  defmacro transaction_type(mti, [{:processing_code, pattern}], do: block) do
     quote do
       @txn_config {:mti, unquote(mti)}
+      @txn_config {:processing_code_pattern, unquote(pattern)}
+      unquote(block)
+    end
+  end
+
+  # Handle without options: transaction_type "0100" do
+  # Elixir parses this as: transaction_type("0100", do: ...)
+  # Which is 2 args: mti and do block
+  defmacro transaction_type(mti, do: block) do
+    quote do
+      @txn_config {:mti, unquote(mti)}
+      @txn_config {:processing_code_pattern, "*"}
       unquote(block)
     end
   end
@@ -101,26 +127,18 @@ defmodule Ex_Iso8583.TransactionType do
     end
   end
 
-  @doc """
-  Defines processing code specific overrides.
-  """
-  defmacro processing_code(code, [{:do, block}]) do
-    quote do
-      @txn_config {:processing_code, unquote(code), unquote(Macro.escape(block))}
-    end
-  end
-
   @doc false
   defmacro __before_compile__(env) do
     config = Module.get_attribute(env.module, :txn_config)
 
-    {mti, fields, mandatory_map, optional_map} = build_config(config)
+    {mti, proc_code_pattern, fields, mandatory, optional} = build_config(config)
 
     quote do
       @mti unquote(macro_escape(mti))
+      @processing_code_pattern unquote(macro_escape(proc_code_pattern))
       @field_mapping unquote(Macro.escape(fields))
-      @mandatory_fields unquote(Macro.escape(mandatory_map))
-      @optional_fields unquote(Macro.escape(optional_map))
+      @mandatory_fields unquote(Macro.escape(mandatory))
+      @optional_fields unquote(Macro.escape(optional))
 
       @doc """
       Returns the MTI for this transaction type.
@@ -128,30 +146,37 @@ defmodule Ex_Iso8583.TransactionType do
       def mti, do: @mti
 
       @doc """
+      Returns the processing code pattern for this transaction type.
+      """
+      def processing_code_pattern, do: @processing_code_pattern
+
+      @doc """
+      Checks if this transaction type matches the given MTI and processing code.
+      """
+      def matches?(mti, processing_code) do
+        @mti == mti and Ex_Iso8583.TransactionType.matches_pattern?(@processing_code_pattern, processing_code)
+      end
+
+      @doc """
       Returns the field mapping (struct fields to ISO field numbers).
       """
       def field_mapping, do: @field_mapping
 
       @doc """
-      Returns mandatory field names for a given processing code.
-      Defaults to the general mandatory list if no processing code override exists.
+      Returns mandatory field names.
       """
-      def mandatory_fields(processing_code \\ nil) do
-        Map.get(@mandatory_fields, processing_code, @mandatory_fields[:default] || [])
-      end
+      def mandatory_fields, do: @mandatory_fields
 
       @doc """
       Returns optional field names.
       """
-      def optional_fields, do: Map.get(@optional_fields, :default, [])
+      def optional_fields, do: @optional_fields
 
       @doc """
       Returns allowed field names (mandatory + optional).
       """
       def allowed_fields do
-        optional = Map.get(@optional_fields, :default, [])
-        mandatory = Map.get(@mandatory_fields, :default, []) || []
-        optional ++ mandatory
+        @optional_fields ++ @mandatory_fields
       end
 
       @doc """
@@ -194,15 +219,12 @@ defmodule Ex_Iso8583.TransactionType do
 
   defp build_config(config) do
     mti = get_config(config, :mti)
+    proc_code_pattern = get_config(config, :processing_code_pattern, "*")
     fields = get_config(config, :fields, %{}) |> unquote_ast()
     mandatory = get_config(config, :mandatory, []) |> unquote_ast()
     optional = get_config(config, :optional, []) |> unquote_ast()
 
-    # Group mandatory fields by processing code
-    mandatory_map = build_processing_code_map(config, mandatory)
-    optional_map = %{default: optional}
-
-    {mti, fields, mandatory_map, optional_map}
+    {mti, proc_code_pattern, fields, mandatory, optional}
   end
 
   # Unquote AST at compile time to get actual values
@@ -213,27 +235,8 @@ defmodule Ex_Iso8583.TransactionType do
 
   defp get_config(config, key, default \\ nil) do
     Enum.find_value(config, default, fn
-      {:processing_code, _code, [^key, val]} -> val
       {^key, val} -> val
       _ -> nil
-    end)
-  end
-
-  defp build_processing_code_map(config, default_list) do
-    # Start with default mandatory fields
-    # Find all processing_code entries with mandatory
-    entries = Enum.filter(config, fn
-      {:processing_code, _code, [:mandatory, _]} -> true
-      _ -> false
-    end)
-
-    # Build map with default
-    map = %{default: default_list}
-
-    # Add processing code specific entries
-    Enum.reduce(entries, map, fn
-      {:processing_code, code, [:mandatory, fields]}, acc ->
-        Map.put(acc, code, fields)
     end)
   end
 
@@ -262,8 +265,14 @@ defmodule Ex_Iso8583.TransactionType do
   Returns `{:ok, struct}` if valid, `{:error, reason}` if validation fails.
   """
   def validate_and_create(module, field_data, processing_code, opts \\ []) do
+    # Check if this module matches the processing code
+    pattern = module.processing_code_pattern()
+    unless matches_pattern?(pattern, processing_code) do
+      {:error, {:processing_code_mismatch, pattern, processing_code}}
+    end
+
     field_mapping = module.field_mapping()
-    mandatory = module.mandatory_fields(processing_code)
+    mandatory = module.mandatory_fields()
     optional = module.optional_fields()
 
     # Get strict mode option (default true - reject extra fields)
@@ -345,5 +354,146 @@ defmodule Ex_Iso8583.TransactionType do
       end)
 
     struct(module, struct_data)
+  end
+
+  @doc """
+  Checks if a processing code matches a pattern.
+
+  ## Patterns
+    - Exact match: `"020000"` matches only "020000"
+    - Prefix wildcard: `"01*"` matches any code starting with "01"
+    - Suffix wildcard: `"*1000"` matches any code ending with "1000"
+    - Full wildcard: `"*"` matches all codes
+
+  ## Examples
+      iex> matches_pattern?("020000", "020000")
+      true
+      iex> matches_pattern?("01*", "010000")
+      true
+      iex> matches_pattern?("01*", "020000")
+      false
+      iex> matches_pattern?("*1000", "001000")
+      true
+      iex> matches_pattern?("*", "anything")
+      true
+  """
+  def matches_pattern?(pattern, code) when is_binary(pattern) and is_binary(code) do
+    case pattern do
+      "*" -> true
+      _ ->
+        # Handle prefix wildcard: "01*" matches "010000", "011234", etc.
+        # Handle suffix wildcard: "*1000" matches "001000", "021000", etc.
+        # Handle exact match: "020000" matches "020000" only
+        parts = String.split(pattern, "*")
+
+        case parts do
+          [prefix, ""] ->
+            # Ends with *: prefix wildcard
+            String.starts_with?(code, prefix)
+
+          ["", suffix] ->
+            # Starts with *: suffix wildcard
+            String.ends_with?(code, suffix)
+
+          [prefix, suffix] ->
+            # Middle *: prefix + suffix wildcard
+            String.starts_with?(code, prefix) and String.ends_with?(code, suffix)
+
+          [exact] ->
+            # No wildcard: exact match
+            code == exact
+        end
+    end
+  end
+
+  @doc """
+  Finds the best matching transaction type module from a list.
+
+  Matches are prioritized by:
+  1. Exact match (pattern has no wildcard)
+  2. Prefix match (pattern ends with *)
+  3. Suffix match (pattern starts with *)
+  4. Full wildcard (*)
+
+  Returns `{:ok, module}` if a match is found, `{:error, :no_match}` otherwise.
+
+  ## Examples
+      modules = [AuthRequestPurchase, AuthRequestCashAdvance]
+
+      {:ok, module} = find_transaction_type(modules, "0100", "000000")
+  """
+  def find_transaction_type(modules, mti, processing_code) when is_list(modules) do
+    # Group modules by match type
+    {exact_matches, prefix_matches, suffix_matches, wildcard_matches} =
+      Enum.reduce(modules, {[], [], [], []}, fn module, {exact, prefix, suffix, wildcard} ->
+        try do
+          if module.mti() == mti do
+            pattern = module.processing_code_pattern()
+            if matches_pattern?(pattern, processing_code) do
+              case pattern do
+                "*" -> {exact, prefix, suffix, [module | wildcard]}
+                <<"*", _rest::binary>> -> {exact, prefix, [module | suffix], wildcard}
+                _prefix ->
+                  if String.contains?(pattern, "*") do
+                    {[module | exact], prefix, suffix, wildcard}
+                  else
+                    {[module | exact], prefix, suffix, wildcard}
+                  end
+              end
+            else
+              {exact, prefix, suffix, wildcard}
+            end
+          else
+            {exact, prefix, suffix, wildcard}
+          end
+        rescue
+          _ -> {exact, prefix, suffix, wildcard}
+        end
+      end)
+
+    # Return best match (exact > prefix > suffix > wildcard)
+    cond do
+      exact_matches != [] -> {:ok, hd(exact_matches)}
+      prefix_matches != [] -> {:ok, hd(prefix_matches)}
+      suffix_matches != [] -> {:ok, hd(suffix_matches)}
+      wildcard_matches != [] -> {:ok, hd(wildcard_matches)}
+      true -> {:error, :no_match}
+    end
+  end
+
+  @doc """
+  Parses and validates a message by finding the matching transaction type.
+
+  Takes a list of transaction type modules and automatically finds the
+  one that matches the MTI and processing code.
+
+  Returns `{:ok, struct}` if valid, `{:error, reason}` if validation fails
+  or no matching transaction type is found.
+
+  ## Examples
+      modules = [AuthRequestPurchase, AuthRequestCashAdvance]
+
+      case find_and_parse(modules, iso_msg, msg_type, field_format) do
+        {:ok, txn} -> # handle success
+        {:error, :no_match} -> # no transaction type matched
+        {:error, reason} -> # other validation error
+      end
+  """
+  def find_and_parse(modules, iso_msg, msg_type, field_format, opts \\ []) do
+    try do
+      field_data = Ex_Iso8583.extract_iso_msg(iso_msg, msg_type, field_format)
+      mti = Map.get(field_data, 0)
+      processing_code = Map.get(field_data, 3, "000000")
+
+      case find_transaction_type(modules, mti, processing_code) do
+        {:ok, module} ->
+          validate_and_create(module, field_data, processing_code, opts)
+
+        {:error, :no_match} ->
+          {:error, {:no_matching_transaction_type, mti, processing_code}}
+      end
+    rescue
+      e -> {:error, Exception.message(e)}
+    end
   end
 end

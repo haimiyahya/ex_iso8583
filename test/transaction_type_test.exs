@@ -369,4 +369,163 @@ defmodule TransactionTypeTest do
       assert Map.get(FinancialRequest.field_mapping(), :pos_entry_mode) == 22
     end
   end
+
+  describe "processing code patterns" do
+    # Define transaction types with different processing code patterns
+    defmodule PurchaseRequest do
+      use Ex_Iso8583.TransactionType
+      defstruct [:pan, :processing_code, :amount]
+      transaction_type "0100", processing_code: "00*" do
+        fields %{pan: 2, processing_code: 3, amount: 4}
+        mandatory [:pan, :processing_code, :amount]
+      end
+    end
+
+    defmodule CashAdvanceRequest do
+      use Ex_Iso8583.TransactionType
+      defstruct [:pan, :processing_code, :amount, :cashback]
+      transaction_type "0100", processing_code: "01*" do
+        fields %{pan: 2, processing_code: 3, amount: 4, cashback: 50}
+        mandatory [:pan, :processing_code, :amount, :cashback]
+      end
+    end
+
+    defmodule InquiryRequest do
+      use Ex_Iso8583.TransactionType
+      defstruct [:pan, :processing_code, :stan]
+      transaction_type "0100", processing_code: "020000" do
+        fields %{pan: 2, processing_code: 3, stan: 11}
+        mandatory [:pan, :processing_code, :stan]
+      end
+    end
+
+    defmodule DefaultRequest do
+      use Ex_Iso8583.TransactionType
+      defstruct [:pan, :processing_code]
+      transaction_type "0100", processing_code: "*" do
+        fields %{pan: 2, processing_code: 3}
+        mandatory [:pan, :processing_code]
+      end
+    end
+
+    alias Ex_Iso8583.TransactionType
+
+    test "matches_pattern?/2 matches exact patterns" do
+      assert TransactionType.matches_pattern?("020000", "020000")
+      refute TransactionType.matches_pattern?("020000", "020001")
+    end
+
+    test "matches_pattern?/2 matches prefix wildcards" do
+      assert TransactionType.matches_pattern?("00*", "000000")
+      assert TransactionType.matches_pattern?("00*", "001234")
+      assert TransactionType.matches_pattern?("00*", "009999")
+      refute TransactionType.matches_pattern?("00*", "010000")
+      refute TransactionType.matches_pattern?("00*", "990000")
+    end
+
+    test "matches_pattern?/2 matches suffix wildcards" do
+      assert TransactionType.matches_pattern?("*000", "000000")
+      assert TransactionType.matches_pattern?("*000", "99000")
+      assert TransactionType.matches_pattern?("*000", "12345000")
+      refute TransactionType.matches_pattern?("*000", "000001")
+      refute TransactionType.matches_pattern?("*000", "001230")
+    end
+
+    test "matches_pattern?/2 matches full wildcard" do
+      assert TransactionType.matches_pattern?("*", "anything")
+      assert TransactionType.matches_pattern?("*", "000000")
+      assert TransactionType.matches_pattern?("*", "999999")
+      assert TransactionType.matches_pattern?("*", "")
+    end
+
+    test "transaction_type/2 returns processing_code_pattern" do
+      assert PurchaseRequest.processing_code_pattern() == "00*"
+      assert CashAdvanceRequest.processing_code_pattern() == "01*"
+      assert InquiryRequest.processing_code_pattern() == "020000"
+      assert DefaultRequest.processing_code_pattern() == "*"
+    end
+
+    test "matches?/2 checks if MTI and processing code match" do
+      assert PurchaseRequest.matches?("0100", "000000")
+      assert PurchaseRequest.matches?("0100", "001234")
+      refute PurchaseRequest.matches?("0100", "010000")
+      refute PurchaseRequest.matches?("0110", "000000")
+
+      assert InquiryRequest.matches?("0100", "020000")
+      refute InquiryRequest.matches?("0100", "020001")
+
+      assert DefaultRequest.matches?("0100", "999999")
+      assert DefaultRequest.matches?("0100", "123456")
+    end
+
+    test "find_transaction_type/3 finds exact match over wildcard" do
+      modules = [PurchaseRequest, InquiryRequest, DefaultRequest]
+
+      # Exact match should be preferred over prefix/wildcard
+      assert {:ok, InquiryRequest} = TransactionType.find_transaction_type(modules, "0100", "020000")
+
+      # Prefix match should be found
+      assert {:ok, PurchaseRequest} = TransactionType.find_transaction_type(modules, "0100", "000000")
+      assert {:ok, PurchaseRequest} = TransactionType.find_transaction_type(modules, "0100", "009999")
+
+      # Fallback to wildcard
+      assert {:ok, DefaultRequest} = TransactionType.find_transaction_type(modules, "0100", "999999")
+
+      # No match for different MTI
+      assert {:error, :no_match} = TransactionType.find_transaction_type(modules, "0200", "000000")
+    end
+
+    test "find_transaction_type/3 prioritizes exact > prefix > suffix > wildcard" do
+      # Define modules with different pattern types for the same MTI
+      defmodule ExactPattern do
+        use Ex_Iso8583.TransactionType
+        defstruct [:pan]
+        transaction_type "0200", processing_code: "000000" do
+          fields %{pan: 2}
+          mandatory [:pan]
+        end
+      end
+
+      defmodule PrefixPattern do
+        use Ex_Iso8583.TransactionType
+        defstruct [:pan, :amount]
+        transaction_type "0200", processing_code: "00*" do
+          fields %{pan: 2, amount: 4}
+          mandatory [:pan, :amount]
+        end
+      end
+
+      defmodule SuffixPattern do
+        use Ex_Iso8583.TransactionType
+        defstruct [:pan, :stan]
+        transaction_type "0200", processing_code: "*000" do
+          fields %{pan: 2, stan: 11}
+          mandatory [:pan, :stan]
+        end
+      end
+
+      defmodule WildcardPattern do
+        use Ex_Iso8583.TransactionType
+        defstruct [:pan]
+        transaction_type "0200", processing_code: "*" do
+          fields %{pan: 2}
+          mandatory [:pan]
+        end
+      end
+
+      modules = [PrefixPattern, SuffixPattern, WildcardPattern, ExactPattern]
+
+      # Exact match wins
+      assert {:ok, ExactPattern} = TransactionType.find_transaction_type(modules, "0200", "000000")
+
+      # Prefix match comes before suffix
+      assert {:ok, PrefixPattern} = TransactionType.find_transaction_type(modules, "0200", "001234")
+
+      # Suffix match
+      assert {:ok, SuffixPattern} = TransactionType.find_transaction_type(modules, "0200", "99000")
+
+      # Wildcard fallback
+      assert {:ok, WildcardPattern} = TransactionType.find_transaction_type(modules, "0200", "999999")
+    end
+  end
 end
