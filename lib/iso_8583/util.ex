@@ -1,7 +1,28 @@
 defmodule Util do
+  @moduledoc """
+  Utility functions for ISO 8583 message processing.
+
+  Provides helper functions for string manipulation, BCD encoding/decoding,
+  and data sanitization.
+  """
+
   require Integer
 
-  # New flexible padding function supporting both left and right padding
+  @doc """
+  Flexible padding function supporting both left and right padding.
+
+  ## Parameters
+    - value: The string to pad
+    - size: Target size
+    - padding_char: Character to use for padding
+    - direction: :left or :right
+
+  ## Examples
+      iex> Util.pad_string("abc", 5, "0", :left)
+      "00abc"
+      iex> Util.pad_string("abc", 5, " ", :right)
+      "abc  "
+  """
   def pad_string(value, size, padding_char, direction \\ :left) when is_binary(value) do
     value_len = byte_size(value)
 
@@ -107,6 +128,24 @@ defmodule Util do
       true -> {:ok, Base.encode16(value)}
       false -> {:error, "Invalid Parameter"}
     end
+  end
+
+  @doc """
+  Converts binary to hex, raising on error (bang version).
+  """
+  def convert_bin_to_hex!(value) do
+    case convert_bin_to_hex(value) do
+      {:ok, result} -> result
+      {:error, _} -> raise ArgumentError, "Invalid binary value"
+    end
+  end
+
+  @doc """
+  Takes the first n bytes from a binary.
+  """
+  def take_first_bytes(value, n) when is_binary(value) do
+    bin_length = min(byte_size(value), n)
+    binary_part(value, 0, bin_length)
   end
 
   def make_even(value) do
