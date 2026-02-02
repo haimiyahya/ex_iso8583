@@ -48,7 +48,7 @@ defmodule Ex_Iso8583 do
       field_format_and_values
       # will return {a, formatted_field}
       |> Enum.map(fn {a, b, c} ->
-        {a, IsoField.form_field({a, b}, c, msg_type[:field_header_type])}
+        {a, IsoField.form_field({a, b}, c, msg_type[:field_header_type], msg_type)}
       end)
 
     concatenated_fields = List.foldl(formatted_values, "", fn {_, value}, acc -> acc <> value end)

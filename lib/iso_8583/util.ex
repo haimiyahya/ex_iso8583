@@ -1,6 +1,28 @@
 defmodule Util do
   require Integer
 
+  # New flexible padding function supporting both left and right padding
+  def pad_string(value, size, padding_char, direction \\ :left) when is_binary(value) do
+    value_len = byte_size(value)
+
+    cond do
+      value_len < size ->
+        padding_count = size - value_len
+        padding = String.duplicate(padding_char, padding_count)
+
+        case direction do
+          :right -> value <> padding
+          _ -> padding <> value
+        end
+
+      value_len > size ->
+        String.slice(value, byte_size(value) - size, size)
+
+      true ->
+        value
+    end
+  end
+
   def check_if_required_pad_left(value, 0, :bcd, max_len) do
     pad_left_bcd(value, max_len)
   end
