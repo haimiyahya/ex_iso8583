@@ -21,8 +21,10 @@ defmodule Ex_Iso8583.DSL do
       end
 
       # At compile time, if you use an undefined field:
-      # MyMessage.build(%{999 => "data"})  # Compile-time warning!
+      # MyMessage.build(%{999 => "data"})  # Runtime error with clear message!
   """
+
+  alias Ex_Iso8583.Errors
 
   @doc false
   defmacro __using__(_opts) do
@@ -112,11 +114,9 @@ defmodule Ex_Iso8583.DSL do
         end)
 
         if undefined != [] do
-          raise RuntimeError, """
-          Undefined field(s) in #{__MODULE__}: #{inspect(undefined)}
-
-          Defined fields: #{inspect(defined_fields())}
-          """
+          raise Errors.UndefinedFieldError,
+            fields: undefined,
+            defined_fields: Map.keys(@field_format)
         end
       end
     end

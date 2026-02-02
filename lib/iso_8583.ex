@@ -22,6 +22,9 @@ defmodule Ex_Iso8583 do
   """
 
   @type field_format_definition :: %{pos_integer() => String.t() | map()}
+  @type msg_type :: %{bitmap_type: :binary | :ascii, field_header_type: atom()}
+
+  alias Ex_Iso8583.Errors
 
   @doc """
   Extracts fields from an ISO 8583 binary message.
@@ -35,7 +38,9 @@ defmodule Ex_Iso8583 do
     Map of field numbers to their values
 
   ## Raises
-    `RuntimeError` - if a field in the bitmap is not defined in field_format_definition
+    * `Errors.UndefinedFieldError` - if a field in the bitmap is not defined in field_format_definition
+    * `Errors.BitmapError` - if the bitmap cannot be parsed
+    * `Errors.MessageLengthError` - if message length is invalid
   """
   def extract_iso_msg(iso_msg_without_tpdu, msg_type, field_format_definition) do
     {:ok, bitmap, msg_data} = IsoBitmap.split_bitmap_and_msg(iso_msg_without_tpdu, msg_type)
@@ -47,18 +52,9 @@ defmodule Ex_Iso8583 do
     undefined_fields = Enum.filter(bitmap_field_list, fn field -> field not in defined_field_numbers end)
 
     if undefined_fields != [] do
-      raise RuntimeError, """
-      Undefined field(s) in message: #{inspect(undefined_fields)}
-
-      The following fields from the message bitmap are not defined in field_format_definition:
-      #{inspect(undefined_fields)}
-
-      Please add format definitions for these fields:
-
-      #{Enum.map(undefined_fields, fn field -> "  #{field} => \"format_definition\"" end) |> Enum.join("\n")}
-
-      Current field_format_definition keys: #{inspect(Map.keys(field_format_definition))}
-      """
+      raise Errors.UndefinedFieldError,
+        fields: undefined_fields,
+        defined_fields: defined_field_numbers
     end
 
     field_format_list =
@@ -89,28 +85,22 @@ defmodule Ex_Iso8583 do
     Binary ISO 8583 message (bitmap + fields)
 
   ## Raises
-    `RuntimeError` - if a field in iso_data is not defined in field_format_definition
+    * `Errors.UndefinedFieldError` - if a field in iso_data is not defined in field_format_definition
+    * `Errors.InvalidFieldValueError` - if a field value doesn't match its format
   """
   def form_iso_msg(iso_data, msg_type, field_format_definition) do
     # Validate that all fields in iso_data have format definitions
+    defined_field_numbers = Map.keys(field_format_definition)
+
     undefined_fields =
       iso_data
       |> Map.keys()
-      |> Enum.filter(fn field -> field not in Map.keys(field_format_definition) end)
+      |> Enum.filter(fn field -> field not in defined_field_numbers end)
 
     if undefined_fields != [] do
-      raise RuntimeError, """
-      Undefined field(s) in data: #{inspect(undefined_fields)}
-
-      The following fields from iso_data are not defined in field_format_definition:
-      #{inspect(undefined_fields)}
-
-      Please add format definitions for these fields:
-
-      #{Enum.map(undefined_fields, fn field -> "  #{field} => \"format_definition\"" end) |> Enum.join("\n")}
-
-      Current field_format_definition keys: #{inspect(Map.keys(field_format_definition))}
-      """
+      raise Errors.UndefinedFieldError,
+        fields: undefined_fields,
+        defined_fields: defined_field_numbers
     end
 
     bitmap_type = msg_type[:bitmap_type]

@@ -3,6 +3,7 @@ defmodule CompileTimeValidationTest do
   doctest Ex_Iso8583
 
   alias Ex_Iso8583
+  alias Ex_Iso8583.Errors
 
   # Example message definition using the DSL
   defmodule TestMessage do
@@ -49,7 +50,7 @@ defmodule CompileTimeValidationTest do
     test "build/2 raises error for undefined fields at runtime" do
       data = %{999 => "undefined"}
 
-      assert_raise RuntimeError, ~r/Undefined field.*999/, fn ->
+      assert_raise Errors.UndefinedFieldError, ~r/Undefined field.*999/, fn ->
         TestMessage.build(data)
       end
     end
