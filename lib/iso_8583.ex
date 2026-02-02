@@ -21,6 +21,8 @@ defmodule Ex_Iso8583 do
       iso_msg = Ex_Iso8583.form_iso_msg(fields, msg_type, field_format)
   """
 
+  @type field_format_definition :: %{pos_integer() => String.t() | map()}
+
   @doc """
   Extracts fields from an ISO 8583 binary message.
 
@@ -31,9 +33,33 @@ defmodule Ex_Iso8583 do
 
   ## Returns
     Map of field numbers to their values
+
+  ## Raises
+    `RuntimeError` - if a field in the bitmap is not defined in field_format_definition
   """
   def extract_iso_msg(iso_msg_without_tpdu, msg_type, field_format_definition) do
     {:ok, bitmap, msg_data} = IsoBitmap.split_bitmap_and_msg(iso_msg_without_tpdu, msg_type)
+
+    # Validate that all fields in bitmap have format definitions
+    bitmap_field_list = IsoBitmap.bitmap_to_list(bitmap) |> Enum.filter(&(&1 > 1))
+    defined_field_numbers = Map.keys(field_format_definition)
+
+    undefined_fields = Enum.filter(bitmap_field_list, fn field -> field not in defined_field_numbers end)
+
+    if undefined_fields != [] do
+      raise RuntimeError, """
+      Undefined field(s) in message: #{inspect(undefined_fields)}
+
+      The following fields from the message bitmap are not defined in field_format_definition:
+      #{inspect(undefined_fields)}
+
+      Please add format definitions for these fields:
+
+      #{Enum.map(undefined_fields, fn field -> "  #{field} => \"format_definition\"" end) |> Enum.join("\n")}
+
+      Current field_format_definition keys: #{inspect(Map.keys(field_format_definition))}
+      """
+    end
 
     field_format_list =
       IsoFieldFormat.get_field_format_list(bitmap, msg_type, field_format_definition)
@@ -61,8 +87,32 @@ defmodule Ex_Iso8583 do
 
   ## Returns
     Binary ISO 8583 message (bitmap + fields)
+
+  ## Raises
+    `RuntimeError` - if a field in iso_data is not defined in field_format_definition
   """
   def form_iso_msg(iso_data, msg_type, field_format_definition) do
+    # Validate that all fields in iso_data have format definitions
+    undefined_fields =
+      iso_data
+      |> Map.keys()
+      |> Enum.filter(fn field -> field not in Map.keys(field_format_definition) end)
+
+    if undefined_fields != [] do
+      raise RuntimeError, """
+      Undefined field(s) in data: #{inspect(undefined_fields)}
+
+      The following fields from iso_data are not defined in field_format_definition:
+      #{inspect(undefined_fields)}
+
+      Please add format definitions for these fields:
+
+      #{Enum.map(undefined_fields, fn field -> "  #{field} => \"format_definition\"" end) |> Enum.join("\n")}
+
+      Current field_format_definition keys: #{inspect(Map.keys(field_format_definition))}
+      """
+    end
+
     bitmap_type = msg_type[:bitmap_type]
     bitmap = IsoBitmap.create_bitmap(iso_data)
 
