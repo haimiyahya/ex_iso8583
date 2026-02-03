@@ -218,6 +218,42 @@ defmodule Ex_Iso8583.TransactionType do
       def create(data) when is_map(data) do
         Ex_Iso8583.TransactionType.create_struct(__MODULE__, data)
       end
+
+      @doc """
+      Forms and validates an ISO 8583 binary message from this struct.
+
+      Validates that all mandatory fields are present, then forms the message
+      with field value validation enabled.
+
+      ## Parameters
+        - struct: The transaction struct containing field values
+        - msg_type: Message type configuration
+        - field_format: Field format definitions
+        - opts: Additional options (passed through to form_iso_msg)
+
+      ## Returns
+        - `{:ok, binary}` - Successfully formed message
+        - `{:error, {:missing_fields, mti, processing_code, fields}}` - Missing mandatory fields
+        - `{:error, {:invalid_field_value, field, reason}}` - Field value validation failed
+        - `{:error, reason}` - Other errors
+
+      ## Example
+
+          case SaleRequest.form_and_validate(request, msg_type, field_format) do
+            {:ok, iso_msg} -> send_message(iso_msg)
+            {:error, {:missing_fields, _mti, _proc, fields}} -> handle_missing(fields)
+            {:error, {:invalid_field_value, field, reason}} -> handle_invalid(field, reason)
+          end
+      """
+      def form_and_validate(struct, msg_type, field_format, opts \\ []) do
+        Ex_Iso8583.TransactionType.form_and_validate(
+          __MODULE__,
+          struct,
+          msg_type,
+          field_format,
+          opts
+        )
+      end
     end
   end
 
@@ -407,6 +443,80 @@ defmodule Ex_Iso8583.TransactionType do
       end)
 
     struct(module, struct_data)
+  end
+
+  @doc """
+  Forms and validates an ISO 8583 binary message from a transaction struct.
+
+  Validates that all mandatory fields are present and have non-nil values,
+  then forms the message with field value validation enabled.
+
+  ## Parameters
+    - module: The transaction type module
+    - struct: The transaction struct containing field values
+    - msg_type: Message type configuration
+    - field_format: Field format definitions
+    - opts: Additional options
+
+  ## Returns
+    - `{:ok, binary}` - Successfully formed message
+    - `{:error, {:missing_fields, mti, processing_code, field_names}}` - Missing mandatory fields
+    - `{:error, {:invalid_field_value, field_num, reason}}` - Field value validation failed
+    - `{:error, reason}` - Other errors
+
+  ## Example
+
+      case Ex_Iso8583.TransactionType.form_and_validate(
+        SaleRequest,
+        request_struct,
+        msg_type,
+        field_format
+      ) do
+        {:ok, iso_msg} -> send_message(iso_msg)
+        {:error, reason} -> handle_error(reason)
+      end
+  """
+  def form_and_validate(module, struct, msg_type, field_format, opts \\ []) do
+    # Get module configuration
+    mti = module.mti()
+    processing_code = module.processing_code_pattern()
+    field_mapping = module.field_mapping()
+    mandatory = module.mandatory_fields()
+    optional = module.optional_fields()
+
+    # Check for missing mandatory fields in the struct
+    missing = check_missing_mandatory_in_struct(struct, mandatory)
+
+    if missing != [] do
+      {:error, {:missing_fields, mti, processing_code, missing}}
+    else
+      # Convert struct to ISO field data map
+      iso_data = struct_to_iso_data(struct, field_mapping)
+
+      # Form the message with validation enabled
+      case Ex_Iso8583.form_iso_msg(iso_data, msg_type, field_format, validate: true) do
+        {:ok, binary} -> {:ok, binary}
+        {:error, reason} -> {:error, reason}
+      end
+    end
+  end
+
+  # Check which mandatory fields are missing or nil in the struct
+  defp check_missing_mandatory_in_struct(struct, mandatory) do
+    Enum.filter(mandatory, fn field_name ->
+      value = Map.get(struct, field_name)
+      is_nil(value) or value == ""
+    end)
+  end
+
+  # Convert struct to ISO field data map using field_mapping
+  defp struct_to_iso_data(struct, field_mapping) do
+    Enum.reduce(field_mapping, %{}, fn {field_name, iso_field_num}, acc ->
+      case Map.get(struct, field_name) do
+        nil -> acc  # Skip nil values
+        value -> Map.put(acc, iso_field_num, value)
+      end
+    end)
   end
 
   @doc """

@@ -349,6 +349,65 @@ defmodule Ex_Iso8583.TransactionTypeGroup do
 
         Enum.reverse(modules)
       end
+
+      @doc """
+      Forms and validates an ISO 8583 binary message from a request or response struct.
+
+      Automatically determines whether the struct is a request or response,
+      validates mandatory fields, and forms the message with validation enabled.
+
+      ## Parameters
+        - struct: The transaction struct (Request or Response)
+        - msg_type: Message type configuration
+        - field_format: Field format definitions
+        - opts: Additional options
+
+      ## Returns
+        - `{:ok, {:request | :response, binary}}` - Successfully formed message with kind
+        - `{:error, {:unknown_struct_type, struct}}` - Struct is not Request or Response
+        - `{:error, reason}` - Other errors from form_and_validate
+
+      ## Example
+
+          case SaleTransaction.form_and_validate(request_struct, msg_type, field_format) do
+            {:ok, {:request, iso_msg}} -> send_message(iso_msg)
+            {:ok, {:response, iso_msg}} -> send_message(iso_msg)
+            {:error, reason} -> handle_error(reason)
+          end
+      """
+      def form_and_validate(struct, msg_type, field_format, opts \\ []) do
+        # Determine if this is a Request or Response struct
+        struct_module = struct.__struct__
+
+        cond do
+          struct_module == request_module() ->
+            case Ex_Iso8583.TransactionType.form_and_validate(
+              struct_module,
+              struct,
+              msg_type,
+              field_format,
+              opts
+            ) do
+              {:ok, binary} -> {:ok, {:request, binary}}
+              error -> error
+            end
+
+          struct_module == response_module() ->
+            case Ex_Iso8583.TransactionType.form_and_validate(
+              struct_module,
+              struct,
+              msg_type,
+              field_format,
+              opts
+            ) do
+              {:ok, binary} -> {:ok, {:response, binary}}
+              error -> error
+            end
+
+          true ->
+            {:error, {:unknown_struct_type, struct_module}}
+        end
+      end
     end
   end
 

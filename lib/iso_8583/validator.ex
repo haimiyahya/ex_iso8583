@@ -8,8 +8,134 @@ defmodule Ex_Iso8583.Validator do
 
   alias Ex_Iso8583.Errors
 
-  @type data_type :: :bcd | :ascii | :z | :binary | :hex
+  @type data_type :: :bcd | :ascii | :z | :binary | :hex | :ans
   @type validation_result :: :ok | {:error, String.t()}
+
+  @doc """
+  Validates a field value against its format string.
+
+  ## Parameters
+    - field: Field number
+    - value: Field value to validate
+    - format: Format string (e.g., "n ..19", "an 12", "z ..37") or format tuple
+
+  ## Returns
+    :ok if valid, {:error, reason} if invalid
+
+  ## Examples
+
+      iex> Validator.validate_field_value(3, "123456", "n 6")
+      :ok
+
+      iex> Validator.validate_field_value(3, "12a456", "n 6")
+      {:error, "Field 3 must contain only digits (0-9)"}
+
+      iex> Validator.validate_field_value(3, "123456", {2, :bcd, 6, nil})
+      :ok
+  """
+  def validate_field_value(field, value, format) when is_binary(format) do
+    with {:ok, parsed_format} <- parse_format_string(format),
+         :ok <- validate_value_against_format(field, value, parsed_format) do
+      :ok
+    end
+  end
+
+  def validate_field_value(field, value, {_header, _data_type, _max_len, _padding} = format_tuple) do
+    validate_value_against_format(field, value, format_tuple)
+  end
+
+  # Parse format string like "n ..19", "an 12", "z ..37" into components
+  defp parse_format_string(format_string) do
+    normalized = IsoFieldFormat.normalize_format_string(format_string)
+
+    case Regex.run(~r/^([a-zA-Z]+)(\s*)(\.+)?(\s*)(\d+)$/, normalized) do
+      [_, type_code, _dots, dots, _, max_len_str] ->
+        data_type = parse_data_type(type_code)
+        max_len = String.to_integer(max_len_str)
+        # Determine header size based on dots (variable length indicator)
+        header_size = if is_nil(dots) or dots == "", do: 0, else: String.length(dots)
+        {:ok, {header_size, data_type, max_len, nil}}
+
+      nil ->
+        case Regex.run(~r/^([a-zA-Z]+)(\s*)(\.+)?(\s*)(\d+)(b)$/, normalized) do
+          [_, type_code, _dots, dots, _, max_len_str, _] ->
+            data_type = parse_data_type(type_code)
+            max_len = String.to_integer(max_len_str)
+            header_size = if is_nil(dots) or dots == "", do: 0, else: String.length(dots)
+            {:ok, {header_size, data_type, max_len, nil}}
+
+          nil ->
+            {:error, "Invalid format string: #{format_string}"}
+        end
+    end
+  end
+
+  defp parse_data_type("n"), do: :bcd
+  defp parse_data_type("N"), do: :bcd
+  defp parse_data_type("a"), do: :ascii
+  defp parse_data_type("A"), do: :ascii
+  defp parse_data_type("an"), do: :ascii
+  defp parse_data_type("AN"), do: :ascii
+  defp parse_data_type("ans"), do: :ascii
+  defp parse_data_type("ANS"), do: :ascii
+  defp parse_data_type("z"), do: :z
+  defp parse_data_type("Z"), do: :z
+  defp parse_data_type("b"), do: :binary
+  defp parse_data_type("B"), do: :binary
+  defp parse_data_type(_), do: :ascii  # Default to ASCII for unknown types
+
+  defp validate_value_against_format(field, value, {_header, data_type, max_len, _padding}) do
+    with :ok <- validate_data_type(field, value, data_type),
+         :ok <- validate_max_length_for_struct(field, value, max_len) do
+      :ok
+    end
+  end
+
+  defp validate_data_type(field, value, :bcd) do
+    if String.match?(value, ~r/^\d+$/) do
+      :ok
+    else
+      {:error, "Field #{field} must contain only digits (0-9)"}
+    end
+  end
+
+  defp validate_data_type(field, value, :ascii) do
+    if String.printable?(value) and
+         String.to_charlist(value)
+         |> Enum.all?(fn c -> c >= 32 and c <= 126 end) do
+      :ok
+    else
+      {:error, "Field #{field} must contain only printable ASCII characters"}
+    end
+  end
+
+  defp validate_data_type(field, value, :z) do
+    cond do
+      not String.match?(value, ~r/^\d/) ->
+        {:error, "Field #{field} (Track 2) must start with a digit"}
+
+      String.match?(value, ~r/^[\d=DF]*$/) ->
+        :ok
+
+      true ->
+        {:error, "Field #{field} (Track 2) contains invalid characters (only 0-9, =, D, F allowed)"}
+    end
+  end
+
+  defp validate_data_type(_field, _value, :binary) do
+    # Binary data can be anything
+    :ok
+  end
+
+  defp validate_max_length_for_struct(_field, value, max_len) do
+    value_len = String.length(value)
+
+    if value_len > max_len do
+      {:error, "Value length #{value_len} exceeds maximum #{max_len}"}
+    else
+      :ok
+    end
+  end
 
   @doc """
   Validates a field value against its data type and constraints.
