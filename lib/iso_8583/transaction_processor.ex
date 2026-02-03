@@ -25,7 +25,27 @@ defmodule TransactionProcessor do
 
   Concurrency and supervision concerns should be handled by a separate layer.
 
-  ## Example
+  ## Quick Start
+
+  First, define your request and response structs:
+
+      defmodule SaleRequest do
+        use TransactionType
+
+        defstruct [:pan, :amount, :stan, :terminal_id]
+
+        # Define transaction type configuration...
+      end
+
+      defmodule SaleResponse do
+        use TransactionType
+
+        defstruct [:response_code, :amount, :stan, :auth_code]
+
+        # Define transaction type configuration...
+      end
+
+  Then create a processor with one or more handlers:
 
       defmodule MyProcessor do
         use TransactionProcessor
@@ -33,23 +53,80 @@ defmodule TransactionProcessor do
         config error_response_code_field: 39,
               error_message_field: 60
 
-        defhandler :sale, SaleTransaction.Request, SaleTransaction.Response do
-          @before_hook :log_request
-          @after_hook :log_response
+        # Define a sale handler with hooks
+        defhandler :sale, SaleRequest, SaleResponse,
+          before_hooks: [:validate_amount],
+          after_hooks: [:log_response] do
 
-          def handle(%SaleTransaction.Request{amount: amount} = req) do
+          def handle(%SaleRequest{amount: amount, stan: stan} = req) do
             # Business logic here
-            %SaleTransaction.Response{
+            %SaleResponse{
               response_code: "00",
               amount: amount,
-              stan: req.stan
+              stan: stan,
+              auth_code: generate_auth_code()
             }
           end
 
-          defp log_request(_req), do: :ok
-          defp log_response(_resp), do: :ok
+          # Hooks must be public functions (def, not defp)
+          def validate_amount(%SaleRequest{amount: amount} = req)
+              when is_integer(amount) and amount > 0, do: req
+          def validate_amount(_), do: raise(ArgumentError, "Invalid amount")
+
+          def log_response(resp), do: resp
+
+          defp generate_auth_code, do: :rand.uniform(999_999) |> to_string()
+        end
+
+        # Define another handler for void transactions
+        defhandler :void, VoidRequest, VoidResponse do
+          def handle(%VoidRequest{stan: stan}) do
+            %VoidResponse{response_code: "00", stan: stan}
+          end
         end
       end
+
+  ## Processing Transactions
+
+  Process a raw ISO 8583 message:
+
+      {:ok, response} = MyProcessor.process(raw_iso_message)
+
+  Process a pre-parsed request struct:
+
+      request = %SaleRequest{amount: 10000, stan: "000123", ...}
+      {:ok, response} = MyProcessor.process_struct(request)
+
+  ## Hooks
+
+  Hooks are functions that run before or after your handler. They are specified
+  as keyword arguments:
+
+  - `before_hooks: [:hook1, :hook2]` - List of functions to call before `handle/1`
+  - `after_hooks: [:hook1]` - List of functions to call after `handle/1`
+
+  **Important**: Hook functions must be defined as `def` (public), not `defp` (private).
+
+  Before hooks receive the request and must return the (possibly modified) request.
+  If a before hook raises an exception, the handler is not executed and the error
+  is caught and returned as `{:error, {:handler_error, reason}}`.
+
+  After hooks receive the response and must return the (possibly modified) response.
+
+  ## Handler Discovery
+
+  Handlers are discovered by matching the request struct's module against the
+  registered `request_module` for each handler. This means each handler must
+  have a unique request module.
+
+  ## Error Handling
+
+  When an error occurs during processing, the processor returns `{:error, reason}`.
+  The reason can be:
+  - `{:missing_fields, fields}` - Required fields are missing from the request
+  - `{:handler_error, message}` - An error occurred in the handler or hooks
+  - `{:invalid_response_type, actual, expected}` - Handler returned wrong type
+  - `:not_found` - No handler found for the request type
 
   """
 
@@ -117,52 +194,84 @@ defmodule TransactionProcessor do
   @doc """
   Defines a transaction handler with type validation.
 
-  The macro ensures at compile-time that:
-  - The `handle/1` function accepts the correct request struct type
-  - The `handle/1` function returns the correct response struct type
-  - Required callbacks are implemented
+  The macro creates a nested handler module and ensures at runtime that
+  the `handle/1` function returns the correct response struct type.
 
   ## Parameters
 
   - `name` - Unique identifier for this handler (atom)
-  - `request_module` - The request struct module (must use TransactionType)
-  - `response_module` - The response struct module (must use TransactionType)
-  - `opts` - Keyword list of options:
-    - `:before_hooks` - List of hook function atoms to call before handle/1
-    - `:after_hooks` - List of hook function atoms to call after handle/1
+  - `request_module` - The request struct module
+  - `response_module` - The response struct module
+  - `opts` - Keyword list of options (optional)
 
   ## Options
 
-  - `before_hook` - Single hook to call before `handle/1` (or `before_hooks: [...]`)
-  - `after_hook` - Single hook to call after `handle/1` (or `after_hooks: [...]`)
+  - `:before_hooks` - List of hook function atoms to call before `handle/1`
+  - `:before_hook` - Single hook to call before `handle/1` (shorthand for `before_hooks: [hook]`)
+  - `:after_hooks` - List of hook function atoms to call after `handle/1`
+  - `:after_hook` - Single hook to call after `handle/1` (shorthand for `after_hooks: [hook]`)
 
   ## Hooks
 
-  Hooks are functions defined in the handler body that will be called
-  with the request (before) or response (after) as the only argument.
+  Hooks are functions defined within the handler body. They receive the
+  request (before hooks) or response (after hooks) and must return the
+  (possibly modified) struct.
 
-  ## Example
+  **Important**: Hook functions must be defined as `def` (public), not `defp` (private),
+  since they are called from outside the handler module.
 
-      defhandler :sale, SaleTransaction.Request, SaleTransaction.Response,
-        before_hook: :log_request,
-        after_hook: :log_response do
+  ## Examples
 
-        def handle(%SaleTransaction.Request{amount: amount} = req) do
-          # Process request
-          %SaleTransaction.Response{response_code: "00"}
+  ### Basic handler without hooks
+
+      defhandler :sale, SaleRequest, SaleResponse do
+        def handle(%SaleRequest{amount: amount} = req) do
+          %SaleResponse{
+            response_code: "00",
+            amount: amount,
+            stan: req.stan
+          }
         end
-
-        defp log_request(req), do: Logger.debug("Request: \#{inspect(req)}")
-        defp log_response(resp), do: Logger.debug("Response: \#{inspect(resp)}")
       end
 
-  ## Multiple hooks
+  ### Handler with single hooks (using singular form)
 
       defhandler :sale, SaleRequest, SaleResponse,
-        before_hooks: [:validate, :log],
-        after_hooks: [:log_response] do
-        ...
+        before_hook: :validate,
+        after_hook: :log do
+
+        def handle(%SaleRequest{} = req) do
+          %SaleResponse{response_code: "00"}
+        end
+
+        def validate(%SaleRequest{amount: amt} = req) when amt > 0, do: req
+        def validate(_), do: raise(ArgumentError, "Invalid amount")
+
+        def log(resp), do: resp
       end
+
+  ### Handler with multiple hooks (using plural form)
+
+      defhandler :sale, SaleRequest, SaleResponse,
+        before_hooks: [:validate_amount, :check_terminal],
+        after_hooks: [:log_response, :add_timestamp] do
+
+        def handle(%SaleRequest{} = req) do
+          %SaleResponse{response_code: "00"}
+        end
+
+        def validate_amount(%SaleRequest{amount: amt} = req) when amt > 0, do: req
+        def validate_amount(_), do: raise(ArgumentError, "Invalid amount")
+
+        def check_terminal(req), do: req  # Pass-through validation
+
+        def log_response(resp), do: resp
+
+        def add_timestamp(%{__struct__: mod} = resp) do
+          Map.put(resp, :processed_at, DateTime.utc_now())
+        end
+      end
+
   """
   # Accepts variable number of arguments after name, request_module, response_module
   # This handles both:
@@ -682,12 +791,45 @@ defmodule TransactionProcessor.Handler do
   @moduledoc """
   Behaviour for transaction handlers.
 
-  Handlers must implement the `handle/1` function which accepts
-  a request struct and returns a response struct.
+  This behaviour is automatically applied to handler modules created by
+  the `defhandler/3-6` macro. You typically don't need to use this behaviour
+  directly.
+
+  ## Example
+
+  The `defhandler` macro automatically creates a module that implements this
+  behaviour:
+
+      defmodule MyProcessor do
+        use TransactionProcessor
+
+        defhandler :sale, SaleRequest, SaleResponse do
+          def handle(%SaleRequest{amount: amount}) do
+            %SaleResponse{response_code: "00", amount: amount}
+          end
+        end
+      end
+
+  # The above creates: MyProcessor.Sale
+  # Which implements the TransactionProcessor.Handler behaviour
+
+  ## Callbacks
+
+  - `handle/1` - Processes a request and returns a response
+
   """
 
   @doc """
   Processes a transaction request and returns a response.
+
+  ## Parameters
+
+  - `request` - A request struct (the type specified in `defhandler`)
+
+  ## Returns
+
+  A response struct (the type specified in `defhandler`)
+
   """
   @callback handle(struct()) :: struct()
 end
