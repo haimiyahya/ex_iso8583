@@ -9,11 +9,17 @@ An Elixir library for parsing and formatting ISO 8583 messages - the internation
 ```
 Ex_Iso8583
     |
-    +-- IsoBitmap       - Bitmap management (creation, parsing, transformation)
-    +-- IsoField        - Field extraction and formatting
-    +-- IsoFieldFormat  - Field format definition parsing
-    +-- IsoMsg          - Message structure definition
-    +-- Util            - Utility functions for data manipulation
+    +-- IsoBitmap            - Bitmap management (creation, parsing, transformation)
+    +-- IsoField             - Field extraction and formatting
+    +-- IsoFieldFormat       - Field format definition parsing
+    +-- IsoMsg               - Message structure definition
+    +-- Util                 - Utility functions for data manipulation
+    |
+    +-- TransactionType      - Type-safe transaction struct definitions
+    +-- TransactionTypeGroup - Transaction grouping (request/response pairs)
+    |
+    +-- TransactionProcessor - Pure functional transaction processing DSL
+         +-- Middleware       - Logging, timing, validation, transformation
 ```
 
 ### Core Modules
@@ -94,6 +100,168 @@ Common helper functions:
 - Numeric sanitization
 - BCD length calculation
 - Binary-to-hex conversion
+
+### Transaction Types
+
+#### `TransactionType` - Type-Safe Transaction Definitions
+
+Define strongly-typed transaction structs with automatic encoding/decoding:
+
+```elixir
+defmodule SaleRequest do
+  use Ex_Iso8583.TransactionType
+
+  transaction_type "0200", "001000"
+
+  defstruct [:pan, :amount, :stan, :terminal_id, :processing_code]
+
+  field_mapping %{
+    pan: 2,
+    amount: 4,
+    stan: 11,
+    terminal_id: 41,
+    processing_code: 3
+  }
+
+  field_formats %{
+    2 => "n ..19",
+    3 => "n 6",
+    4 => "n 12",
+    11 => "n 6",
+    41 => "ans ..8"
+  }
+
+  mandatory_fields [:pan, :amount, :stan, :processing_code]
+end
+```
+
+**Key features:**
+- Automatic ISO message encoding/decoding
+- Type-safe field mapping
+- Mandatory field validation
+- Support for copyable fields (request → response)
+
+#### `TransactionTypeGroup` - Transaction Grouping
+
+Group related transaction types (request/response pairs):
+
+```elixir
+defmodule SaleTransaction do
+  use Ex_Iso8583.TransactionTypeGroup
+
+  request SaleRequest
+  response SaleResponse
+
+  response_mti "0210"
+end
+```
+
+### Transaction Processing
+
+#### `TransactionProcessor` - Pure Functional Handler DSL
+
+The `TransactionProcessor` provides a macro-based DSL for defining transaction handlers with hooks and middleware. It follows a pure functional approach with no processes or supervision.
+
+**Processing Flow:**
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                         TransactionProcessor                         │
+│                                                                     │
+│  1. PARSE        Raw ISO Message ──► Request Struct                 │
+│  2. FIND         Match Request Module ──► Handler                    │
+│  3. VALIDATE     Check Mandatory Fields                              │
+│  4. BEFORE HOOKS Execute validation/transform (can raise errors)     │
+│  5. HANDLE       Execute business logic ──► Response Struct          │
+│  6. AFTER HOOKS  Execute logging/post-processing                      │
+│  7. RETURN       {:ok, Response} | {:error, Reason}                  │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**Define a processor:**
+
+```elixir
+defmodule MyProcessor do
+  use TransactionProcessor
+
+  config error_response_code_field: 39,
+        error_message_field: 60
+
+  # Sale handler with validation and logging hooks
+  defhandler :sale, SaleRequest, SaleResponse,
+    before_hooks: [:validate_amount],
+    after_hooks: [:log_response] do
+
+    def handle(%SaleRequest{amount: amount, stan: stan}) do
+      # Business logic
+      %SaleResponse{
+        response_code: "00",
+        amount: amount,
+        stan: stan,
+        auth_code: generate_auth_code()
+      }
+    end
+
+    # Hooks must be public (def, not defp)
+    def validate_amount(%SaleRequest{amount: amt} = req) when amt > 0, do: req
+    def validate_amount(_), do: raise(ArgumentError, "Invalid amount")
+
+    def log_response(resp), do: resp
+
+    defp generate_auth_code, do: :rand.uniform(999_999) |> to_string()
+  end
+
+  # Void handler
+  defhandler :void, VoidRequest, VoidResponse do
+    def handle(%VoidRequest{stan: stan}) do
+      %VoidResponse{response_code: "00", stan: stan}
+    end
+  end
+end
+```
+
+**Use the processor:**
+
+```elixir
+# Process raw ISO message
+{:ok, response} = MyProcessor.process(raw_iso_message)
+
+# Process pre-parsed struct
+request = %SaleRequest{amount: 10000, stan: "000123", pan: "...", terminal_id: "TERM001"}
+{:ok, response} = MyProcessor.process_struct(request)
+```
+
+**Middleware:**
+
+```elixir
+defmodule MyProcessor do
+  use TransactionProcessor
+
+  # Built-in middleware
+  use_middleware TransactionProcessor.Middleware.Logger
+  use_middleware TransactionProcessor.Middleware.Timer
+
+  # Or custom middleware
+  defmodule AuthMiddleware do
+    @behaviour TransactionProcessor.Middleware
+
+    def call(request, next) do
+      if authenticated?(request) do
+        next.(request)
+      else
+        {:error, :unauthorized}
+      end
+    end
+  end
+end
+```
+
+**Key features:**
+- **Type-safe handlers** - Compile-time validation for request/response types
+- **Before/after hooks** - Validation, transformation, logging
+- **Middleware pipeline** - Composable cross-cutting concerns
+- **Error handling** - Automatic error response generation
+- **Pure functional** - No processes, no supervision (handled separately)
 
 ## Installation
 
