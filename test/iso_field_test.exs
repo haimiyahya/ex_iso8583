@@ -14,7 +14,7 @@ defmodule IsoFieldTest do
     accum = %{}
 
     check all header_size <- positive_integer(),
-      field_val <- StreamData.string(Enum.concat([?0..?9, ?A..?F]))
+      field_val <- StreamData.string(Enum.concat([?0..?9//1, ?A..?F//1]))
                     |> StreamData.filter(fn x -> String.length(x) > 0 && String.length(x) <= max_length end)
     do
 

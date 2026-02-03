@@ -87,7 +87,7 @@ defmodule IsoBitmapTest do
 
   # def list_of_tuple_with_one_dummy_empty_value() do
   #  StreamData.map_of(
-  #    StreamData.integer(3..64),
+  #    StreamData.integer(3..64//1),
   #    StreamData.string(:ascii, min_length: 1, max_length: 999),
   #    min_length: 7,
   #    max_length: 63
@@ -96,12 +96,12 @@ defmodule IsoBitmapTest do
   # end
 
   def list_of_integers_between_2_till_64_ordered() do
-    StreamData.uniq_list_of(StreamData.integer(2..64), min_length: 1, max_length: 20)
+    StreamData.uniq_list_of(StreamData.integer(2..64//1), min_length: 1, max_length: 20)
     |> StreamData.map(&Enum.sort(&1))
   end
 
   def list_of_integers_between_2_till_128_ordered() do
-    StreamData.uniq_list_of(StreamData.integer(2..128), min_length: 1, max_length: 20)
+    StreamData.uniq_list_of(StreamData.integer(2..128//1), min_length: 1, max_length: 20)
     |> StreamData.map(
       &case Enum.any?(&1, fn x -> x >= 65 end),
         do:
@@ -114,7 +114,7 @@ defmodule IsoBitmapTest do
   end
 
   def list_of_integers_between_65_till_128_ordered() do
-    StreamData.uniq_list_of(StreamData.integer(65..128), min_length: 1, max_length: 20)
+    StreamData.uniq_list_of(StreamData.integer(65..128//1), min_length: 1, max_length: 20)
     |> StreamData.map(&Enum.sort(&1))
   end
 
