@@ -7,7 +7,8 @@ defmodule Iso8583.MixProject do
       version: "0.4.0",
       elixir: "~> 1.9",
       start_permanent: Mix.env() == :prod,
-      deps: deps()
+      deps: deps(),
+      docs: docs()
     ]
   end
 
@@ -21,9 +22,33 @@ defmodule Iso8583.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:stream_data, "~> 1.2"}
+      {:stream_data, "~> 1.2"},
+      {:ex_doc, "~> 0.30", only: :dev, runtime: false}
       # {:dep_from_hexpm, "~> 0.3.0"},
       # {:dep_from_git, git: "https://github.com/elixir-lang/my_dep.git", tag: "0.1.0"}
+    ]
+  end
+
+  # Run "mix docs" to generate documentation.
+  defp docs do
+    [
+      name: "ExIso8583",
+      source_url: "https://github.com/yourusername/ex_iso8583",
+      homepage_url: "https://github.com/yourusername/ex_iso8583",
+      main: "readme",
+      extras: ["README.md"],
+      groups_for_modules: [
+        "Core Types": [
+          ISOMsg,
+          IsoBitmap
+        ],
+        "Field Processing": [
+          IsoField
+        ],
+        "Utilities": [
+          Util
+        ]
+      ]
     ]
   end
 end
