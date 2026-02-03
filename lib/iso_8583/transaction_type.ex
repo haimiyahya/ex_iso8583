@@ -558,9 +558,19 @@ defmodule Ex_Iso8583.TransactionType do
     end
   end
 
-  # Extract MTI (Message Type Indicator) from the beginning of the ISO message
-  # MTI is typically the first 4 bytes (ASCII) or 2 bytes (BCCD)
-  defp extract_mti(iso_msg, _msg_type) do
+  @doc """
+  Extracts the MTI (Message Type Indicator) from the beginning of an ISO message.
+
+  MTI is typically the first 4 bytes (ASCII) or 2 bytes (BCD encoded).
+
+  ## Returns
+    - `{mti, rest_of_message}` - Tuple containing the MTI string and remaining message
+
+  ## Examples
+      iex> extract_mti_from_binary(<<"0100", rest::binary>>)
+      {"0100", rest}
+  """
+  def extract_mti_from_binary(iso_msg, _msg_type \\ nil) do
     # Try ASCII MTI first (4 bytes)
     if byte_size(iso_msg) >= 4 do
       mti_bytes = binary_part(iso_msg, 0, 4)
@@ -580,5 +590,11 @@ defmodule Ex_Iso8583.TransactionType do
     else
       {"0000", iso_msg}  # Default fallback
     end
+  end
+
+  # Internal version that returns only MTI for use in find_and_parse
+  defp extract_mti(iso_msg, msg_type) do
+    {mti, _} = extract_mti_from_binary(iso_msg, msg_type)
+    {mti, iso_msg}
   end
 end
