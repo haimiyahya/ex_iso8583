@@ -173,6 +173,14 @@ defmodule Ex_Iso8583.Validator do
     end
   end
 
+  def validate_field_value(field, value, :ans, max_length) when is_binary(value) do
+    # ANS (Alphanumeric with Special) is validated same as ASCII - printable characters
+    with :ok <- validate_ascii_chars(field, value),
+         :ok <- validate_max_length(field, value, max_length) do
+      :ok
+    end
+  end
+
   def validate_field_value(field, value, :z, max_length) when is_binary(value) do
     with :ok <- validate_track2_format(field, value),
          :ok <- validate_max_length(field, value, max_length) do
