@@ -25,6 +25,20 @@ defmodule TransactionProcessor do
 
   Concurrency and supervision concerns should be handled by a separate layer.
 
+  ## Processing Flow
+
+      ┌─────────────────────────────────────────────────────────────────────┐
+      │                         TransactionProcessor                         │
+      │                                                                     │
+      │  1. PARSE        Raw ISO Message ──► Request Struct                 │
+      │  2. FIND         Match Request Module ──► Handler                    │
+      │  3. VALIDATE     Check Mandatory Fields                              │
+      │  4. BEFORE HOOKS Execute validation/transform (can raise errors)     │
+      │  5. HANDLE       Execute business logic ──► Response Struct          │
+      │  6. AFTER HOOKS  Execute logging/post-processing                      │
+      │  7. RETURN       {:ok, Response} | {:error, Reason}                  │
+      └─────────────────────────────────────────────────────────────────────┘
+
   ## Quick Start
 
   First, define your request and response structs:
