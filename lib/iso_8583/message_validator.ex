@@ -188,8 +188,8 @@ defmodule Ex_Iso8583.MessageValidator do
   @doc """
   Validates message integrity by checking that the bitmap matches present fields.
   """
-  def validate_bitmap_consistency(data, msg_binary, msg_type, field_format) do
-    bitmap = IsoBitmap.create_bitmap(data)
+  def validate_bitmap_consistency(data, msg_binary, msg_type, _field_format) do
+    _bitmap = IsoBitmap.create_bitmap(data)
     fields_in_data = Map.keys(data) |> Enum.sort()
 
     fields_in_bitmap =

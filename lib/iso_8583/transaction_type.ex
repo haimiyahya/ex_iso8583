@@ -476,13 +476,13 @@ defmodule Ex_Iso8583.TransactionType do
         {:error, reason} -> handle_error(reason)
       end
   """
-  def form_and_validate(module, struct, msg_type, field_format, opts \\ []) do
+  def form_and_validate(module, struct, msg_type, field_format, _opts \\ []) do
     # Get module configuration
     mti = module.mti()
     processing_code = module.processing_code_pattern()
     field_mapping = module.field_mapping()
     mandatory = module.mandatory_fields()
-    optional = module.optional_fields()
+    _optional = module.optional_fields()
 
     # Check for missing mandatory fields in the struct
     missing = check_missing_mandatory_in_struct(struct, mandatory)
