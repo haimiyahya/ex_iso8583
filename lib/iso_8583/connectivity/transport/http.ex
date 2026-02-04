@@ -77,8 +77,6 @@ defmodule Iso8583.Transport.HTTP.Server do
 
   use Supervisor
 
-  alias Iso8583.Context
-
   defstruct [
     :port,
     :path,
@@ -95,7 +93,6 @@ defmodule Iso8583.Transport.HTTP.Server do
   @doc """
   Starts the HTTP server transport.
   """
-  @impl true
   def start_link(opts) do
     port = Keyword.fetch!(opts, :port)
     path = Keyword.get(opts, :path, "/iso8583")
@@ -123,7 +120,6 @@ defmodule Iso8583.Transport.HTTP.Server do
   @doc """
   Returns the child spec for supervision.
   """
-  @impl true
   def child_spec(opts) do
     %{
       id: __MODULE__,
@@ -138,13 +134,11 @@ defmodule Iso8583.Transport.HTTP.Server do
 
   For HTTP server, this is handled internally by the Plug module.
   """
-  @impl true
   def send(_conn, _data), do: :ok
 
   @doc """
   Registers the callback for receiving messages.
   """
-  @impl true
   def set_receive_callback(server_pid, callback) when is_pid(server_pid) do
     GenServer.call(server_pid, {:set_callback, callback})
   end
@@ -160,7 +154,6 @@ defmodule Iso8583.Transport.HTTP.Server do
   @doc """
   Stops the server.
   """
-  @impl true
   def stop(server_pid) when is_pid(server_pid) do
     Supervisor.stop(server_pid, :normal)
   end
@@ -425,7 +418,7 @@ defmodule Iso8583.Transport.HTTP.Server.Plug do
   end
 
   defp build_context(conn, request_id) do
-    Context.new(
+    Iso8583.Context.new(
       transport_ref: conn,
       client_id: "http_client",
       peer_address: conn.remote_ip,

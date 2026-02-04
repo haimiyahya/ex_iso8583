@@ -121,7 +121,6 @@ defmodule Iso8583.Transport.TCP.Server do
   @doc """
   Starts the TCP server transport.
   """
-  @impl true
   def start_link(opts) do
     port = Keyword.fetch!(opts, :port)
     acceptors = Keyword.get(opts, :acceptors, 10)
@@ -139,7 +138,6 @@ defmodule Iso8583.Transport.TCP.Server do
   @doc """
   Returns the child spec for supervision.
   """
-  @impl true
   def child_spec(opts) do
     %{
       id: __MODULE__,
@@ -152,7 +150,6 @@ defmodule Iso8583.Transport.TCP.Server do
   @doc """
   Sends data to a connected client.
   """
-  @impl true
   def send(socket, data) when is_port(socket) do
     :gen_tcp.send(socket, data)
   end
@@ -160,7 +157,6 @@ defmodule Iso8583.Transport.TCP.Server do
   @doc """
   Registers the callback for receiving messages.
   """
-  @impl true
   def set_receive_callback(server_pid, callback) when is_pid(server_pid) do
     GenServer.call(server_pid, {:set_callback, callback})
   end
@@ -172,7 +168,6 @@ defmodule Iso8583.Transport.TCP.Server do
   @doc """
   Stops the server.
   """
-  @impl true
   def stop(server_pid) when is_pid(server_pid) do
     GenServer.stop(server_pid, :normal)
   end
@@ -567,6 +562,7 @@ defmodule Iso8583.Transport.TCP.Client do
 
   use GenServer
   import Kernel, except: [send: 2]
+  require Logger
 
   alias Iso8583.Context
 
@@ -586,7 +582,6 @@ defmodule Iso8583.Transport.TCP.Client do
   @doc """
   Starts the TCP client transport.
   """
-  @impl true
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts)
   end
@@ -594,7 +589,6 @@ defmodule Iso8583.Transport.TCP.Client do
   @doc """
   Returns the child spec for supervision.
   """
-  @impl true
   def child_spec(opts) do
     %{
       id: __MODULE__,
@@ -607,7 +601,6 @@ defmodule Iso8583.Transport.TCP.Client do
   @doc """
   Sends data to the remote server.
   """
-  @impl true
   def send(:client, data) do
     GenServer.call(__MODULE__, {:send, data})
   end
@@ -619,7 +612,6 @@ defmodule Iso8583.Transport.TCP.Client do
   @doc """
   Registers the callback for receiving messages.
   """
-  @impl true
   def set_receive_callback(client_pid, callback) when is_pid(client_pid) do
     GenServer.call(client_pid, {:set_callback, callback})
   end
@@ -627,7 +619,6 @@ defmodule Iso8583.Transport.TCP.Client do
   @doc """
   Stops the client.
   """
-  @impl true
   def stop(client_pid) when is_pid(client_pid) do
     GenServer.stop(client_pid, :normal)
   end

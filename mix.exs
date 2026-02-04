@@ -8,7 +8,10 @@ defmodule Iso8583.MixProject do
       elixir: "~> 1.9",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
-      docs: docs()
+      docs: docs(),
+      description: description(),
+      package: package(),
+      name: "ExIso8583"
     ]
   end
 
@@ -36,8 +39,8 @@ defmodule Iso8583.MixProject do
   defp docs do
     [
       name: "ExIso8583",
-      source_url: "https://github.com/yourusername/ex_iso8583",
-      homepage_url: "https://github.com/yourusername/ex_iso8583",
+      source_url: "https://github.com/haimiyahya/ex_iso8583",
+      homepage_url: "https://github.com/haimiyahya/ex_iso8583",
       main: "readme",
       extras: ["README.md"],
       groups_for_modules: [
@@ -52,6 +55,27 @@ defmodule Iso8583.MixProject do
           Util
         ]
       ]
+    ]
+  end
+
+  # Hex.pm package description
+  defp description do
+    """
+    An ISO 8583 library for Elixir with field definitions, encoding/decoding,
+    transaction processing, and pluggable transports (TCP, HTTP, UDP).
+    """
+  end
+
+  # Hex.pm package configuration
+  defp package do
+    [
+      name: "ex_iso8583",
+      licenses: ["MIT"],
+      links: %{
+        "GitHub" => "https://github.com/haimiyahya/ex_iso8583",
+        "HexDocs" => "https://hexdocs.pm/ex_iso8583"
+      },
+      files: ~w(lib mix.exs README.md LICENSE)
     ]
   end
 end
