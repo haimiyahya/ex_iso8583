@@ -20,6 +20,7 @@ Ex_Iso8583
     |
     +-- TransactionProcessor - Pure functional transaction processing DSL
          +-- Middleware       - Logging, timing, validation, transformation
+         +-- TimeoutWrapper   - Timeout handling with automatic timeout response
 ```
 
 ### Core Modules
@@ -262,6 +263,33 @@ end
 - **Middleware pipeline** - Composable cross-cutting concerns
 - **Error handling** - Automatic error response generation
 - **Pure functional** - No processes, no supervision (handled separately)
+
+#### `TransactionProcessor.TimeoutWrapper` - Timeout Handling
+
+The `TimeoutWrapper` adds timeout capability to TransactionProcessor while keeping the core processor pure functional:
+
+```elixir
+defmodule PaymentProcessor do
+  use TransactionProcessor.TimeoutWrapper,
+    processor: MyProcessor,
+    timeouts: %{
+      sale: 5000,          # 5 seconds
+      refund: 3000,        # 3 seconds
+      settlement: 30000    # 30 seconds
+    },
+    timeout_response_field: 39,
+    timeout_response_code: "68"
+end
+
+# Process with timeout protection
+{:ok, response} = PaymentProcessor.process_with_timeout(raw_message)
+```
+
+**Features:**
+- Per-transaction-type timeout configuration
+- Automatic timeout response generation
+- Task isolation for clean termination
+- Transaction type detection from MTI + processing code
 
 ## Installation
 
