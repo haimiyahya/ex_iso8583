@@ -266,30 +266,151 @@ end
 
 #### `TransactionProcessor.TimeoutWrapper` - Timeout Handling
 
-The `TimeoutWrapper` adds timeout capability to TransactionProcessor while keeping the core processor pure functional:
+The `TimeoutWrapper` adds timeout capability to TransactionProcessor while keeping the core processor pure functional. It handles the side effects (timing) in a separate layer.
+
+**Why use TimeoutWrapper?**
+
+- **Database delays** - Protect against slow DB queries hanging transactions
+- **External service calls** - Timeout when downstream services are unresponsive
+- **Resource management** - Prevent resource exhaustion from hung transactions
+- **SLA compliance** - Ensure transactions complete within time limits
+
+**Configuration:**
 
 ```elixir
 defmodule PaymentProcessor do
   use TransactionProcessor.TimeoutWrapper,
-    processor: MyProcessor,
-    timeouts: %{
-      sale: 5000,          # 5 seconds
-      refund: 3000,        # 3 seconds
-      settlement: 30000    # 30 seconds
+    processor: MyProcessor,                    # Required: processor to wrap
+    timeouts: %{                                # Required: per-type timeouts (ms)
+      # Fast transactions
+      sale: 5000,                              # 5 seconds
+      void: 3000,                              # 3 seconds
+      refund: 3000,                            # 3 seconds
+      balance_inquiry: 2000,                   # 2 seconds
+
+      # Slower transactions
+      sale_with_cashback: 7000,                # 7 seconds
+      capture: 5000,                           # 5 seconds
+      reversal: 4000,                          # 4 seconds
+
+      # Batch operations (much slower)
+      batch_close: 60000,                      # 60 seconds
+      settlement: 120000,                      # 2 minutes
+
+      # Default for unknown types
+      default: 5000
     },
-    timeout_response_field: 39,
-    timeout_response_code: "68"
+    timeout_response_field: 39,                 # Optional: field for timeout code (default: 39)
+    timeout_response_code: "68"                 # Optional: timeout value (default: "68" per ISO 8583)
 end
 
-# Process with timeout protection
-{:ok, response} = PaymentProcessor.process_with_timeout(raw_message)
+# Process raw ISO message with timeout
+{:ok, response} = PaymentProcessor.process_with_timeout(raw_iso_message)
+
+# Process pre-parsed struct with timeout
+{:ok, response} = PaymentProcessor.process_struct_with_timeout(request_struct)
 ```
+
+**Transaction Type Detection:**
+
+Transaction types are automatically detected from MTI and Processing Code:
+
+| MTI  | Processing Code | Transaction Type    |
+|------|-----------------|---------------------|
+| 0200 | 001000          | sale                |
+| 0200 | 002000          | sale_with_cashback  |
+| 0200 | 00xxxx          | balance_inquiry     |
+| 0200 | 310000          | batch_close         |
+| 0220 | 001000          | refund              |
+| 0400 | 001000          | capture             |
+| 0420 | 001000          | capture_refund      |
+| 0400 | 002000          | void                |
+| 0420 | 002000          | reversal            |
+| 0500 | 001000          | settlement          |
+| 0800 | 001000          | network_management  |
+
+Use a custom detector for non-standard mappings:
+
+```elixir
+defmodule CustomProcessor do
+  use TransactionProcessor.TimeoutWrapper,
+    processor: MyProcessor,
+    timeouts: %{custom_type: 5000},
+    transaction_type_detector: &MyModule.detect_transaction_type/1
+end
+```
+
+**Handling Timeout Responses:**
+
+```elixir
+case PaymentProcessor.process_with_timeout(raw_message) do
+  {:ok, response} ->
+    case Map.get(response, 39) do
+      "68" ->
+        # Transaction timed out
+        Logger.warning("Transaction timed out", stan: Map.get(response, 11))
+        # Response still has STAN and other copied fields for reconciliation
+
+      "00" ->
+        # Transaction approved
+        Logger.info("Transaction approved")
+
+      other ->
+        # Other response code
+        Logger.warning("Transaction declined: #{other}")
+    end
+
+  {:error, reason} ->
+    Logger.error("Processing error: #{inspect(reason)}")
+end
+```
+
+**Adding to Supervision Tree:**
+
+The TimeoutWrapper requires a Task.Supervisor. Add it to your application's children:
+
+```elixir
+# In your application.ex
+defmodule MyApp.Application do
+  use Application
+
+  def start(_type, _args) do
+    children = [
+      TransactionProcessor.TimeoutSupervisor,
+      # ... other children
+    ]
+
+    opts = [strategy: :one_for_one, name: MyApp.Supervisor]
+    Supervisor.start_link(children, opts)
+  end
+end
+```
+
+**Timeout Response Details:**
+
+When a timeout occurs:
+- The processing task is terminated immediately
+- A timeout response is generated with your configured code (default: "68")
+- Common fields are copied from the request (STAN, terminal ID, etc.)
+- The response struct matches your expected response module type
+
+**Timeout Value Guidelines:**
+
+| Transaction Type | Recommended Timeout | Reason |
+|-----------------|-------------------|--------|
+| balance_inquiry | 2000ms | Quick database lookup |
+| sale/void/refund | 5000ms | External API calls |
+| capture          | 5000ms | Acquiring funds |
+| reversal         | 4000ms | Fast processing needed |
+| batch_close      | 60000ms | Multiple operations |
+| settlement       | 120000ms | Batch processing |
 
 **Features:**
 - Per-transaction-type timeout configuration
 - Automatic timeout response generation
 - Task isolation for clean termination
 - Transaction type detection from MTI + processing code
+- No modification to TransactionProcessor required (wrapper pattern)
 
 ## Installation
 

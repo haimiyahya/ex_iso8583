@@ -590,19 +590,58 @@ end
 
 defmodule TransactionProcessor.TimeoutSupervisor do
   @moduledoc """
-  Task supervisor for async transaction processing with timeouts.
+  Supervisor for async transaction processing with timeouts.
 
-  This supervisor should be added to your application's supervision tree
-  to ensure proper isolation of timed-out tasks.
+  This supervisor manages a `Task.Supervisor` that is used by `TimeoutWrapper`
+  to isolate and control transaction processing tasks.
 
-  ## Adding to Supervision Tree
+  ## Purpose
 
-      children = [
-        TransactionProcessor.TimeoutSupervisor
-      ]
+  The TimeoutSupervisor ensures that:
 
-      opts = [strategy: :one_for_one, name: MySupervisor]
-      Supervisor.start_link(children, opts)
+  1. **Task Isolation** - Each transaction runs in its own supervised task
+  2. **Clean Shutdown** - Timed-out tasks can be terminated cleanly
+  3. **Error Containment** - Task crashes don't affect other transactions
+  4. **Resource Management** - Task supervisor limits concurrent operations
+
+  ## Adding to Your Application
+
+  Add this supervisor to your application's supervision tree:
+
+      defmodule MyApp.Application do
+        use Application
+
+        def start(_type, _args) do
+          children = [
+            TransactionProcessor.TimeoutSupervisor,
+            # ... other children
+          ]
+
+          opts = [strategy: :one_for_one, name: MyApp.Supervisor]
+          Supervisor.start_link(children, opts)
+        end
+      end
+
+  ## How It Works
+
+  When you use `TimeoutWrapper`, each transaction is processed as:
+
+  1. `TimeoutWrapper` calls `Task.Supervisor.async_nolink/3`
+  2. The task runs under `TransactionProcessor.TaskSupervisor`
+  3. If timeout occurs, `Task.shutdown/2` terminates the task
+  4. The supervisor ensures clean shutdown and resource cleanup
+
+  ## Configuration
+
+  The supervisor starts a `Task.Supervisor` with default options.
+  You can customize the task supervisor by using a custom wrapper:
+
+      defmodule MyApp.TimeoutWrapper do
+        use TransactionProcessor.TimeoutWrapper,
+          task_supervisor: MyApp.CustomTaskSupervisor,
+          # ... other config
+      end
+
   """
 
   use Supervisor
@@ -615,7 +654,12 @@ defmodule TransactionProcessor.TimeoutSupervisor do
   def init(_init_arg) do
     # Start a Task.Supervisor as a child
     children = [
-      {Task.Supervisor, name: TransactionProcessor.TaskSupervisor}
+      {Task.Supervisor,
+       [
+         name: TransactionProcessor.TaskSupervisor,
+         # Optional: limit concurrent transactions
+         # max_children: 100
+       ]}
     ]
 
     Supervisor.init(children, strategy: :one_for_one)
@@ -623,7 +667,16 @@ defmodule TransactionProcessor.TimeoutSupervisor do
 end
 
 defmodule TransactionProcessor.TaskSupervisor do
-  @moduledoc false
-  # This is the actual Task.Supervisor used by TimeoutWrapper
-  # It's started by TransactionProcessor.TimeoutSupervisor
+  @moduledoc """
+  The actual Task.Supervisor used by TimeoutWrapper.
+
+  This module is started automatically by `TransactionProcessor.TimeoutSupervisor`.
+  You don't need to start it manually.
+
+  If you need a custom task supervisor, specify it in your wrapper configuration:
+
+      use TransactionProcessor.TimeoutWrapper,
+        task_supervisor: MyApp.CustomTaskSupervisor,
+        ...
+  """
 end
