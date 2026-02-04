@@ -12,7 +12,7 @@ Ex_Iso8583
     +-- IsoBitmap            - Bitmap management (creation, parsing, transformation)
     +-- IsoField             - Field extraction and formatting
     +-- IsoFieldFormat       - Field format definition parsing
-    +-- IsoMsg               - Message structure definition
+    +-- IsoMsg               - Message structure definition with helper functions
     +-- Util                 - Utility functions for data manipulation
     |
     +-- TransactionType      - Type-safe transaction struct definitions
@@ -22,12 +22,17 @@ Ex_Iso8583
          +-- Middleware       - Logging, timing, validation, transformation
          +-- TimeoutWrapper   - Timeout handling with automatic timeout response
     |
+    +-- Iso8583.Formatter    - Behaviour for wire format encoding/decoding
+    +-- Iso8583.Client       - High-level client with automatic encoding/decoding
+    +-- Iso8583.Formatters   - Built-in formatters (Binary, AsciiHex)
+    |
     +-- Iso8583.Connectivity - Transport abstraction layer
          +-- Context          - Struct for transport metadata
          +-- Transport        - Behaviour for transport implementations
          +-- Handler          - Generic handler connecting processor + transport
          +-- Transport.TCP    - TCP Server and Client implementations
          +-- Transport.HTTP   - HTTP Server implementation (JSON/REST API)
+         +-- Transport.WebSocket - WebSocket Server and Client implementations
          +-- Transport.UDP    - UDP Server and Client implementations (planned)
 ```
 
@@ -658,6 +663,259 @@ defmodule MyCustomTransport do
   end
 end
 ```
+
+## Formatter and Client API
+
+The library provides a high-level API for working with transaction structs instead of raw binaries. This is useful when building proxy/gateway applications that need to transform messages between different wire formats.
+
+### Iso8583.Formatter Behaviour
+
+The `Iso8583.Formatter` behaviour defines how to convert between ISOMsg structs and wire format binaries. Different backends may use different encodings (binary, ASCII hex, etc.).
+
+```elixir
+defmodule MyApp.CustomFormatter do
+  @behaviour Iso8583.Formatter
+
+  @impl true
+  def encode(%ISOMsg{} = iso_msg) do
+    # Convert ISOMsg to your wire format
+    mti = ISOMsg.get_mti(iso_msg)
+    data = ISOMsg.get_data(iso_msg)
+    # ... encoding logic
+    mti <> bitmap <> fields_data
+  end
+
+  @impl true
+  def decode(raw_binary) do
+    # Convert wire format to ISOMsg
+    # ... parsing logic
+    {:ok, %ISOMsg{mti: mti, data: data}}
+  end
+end
+```
+
+### Built-in Formatters
+
+#### `Iso8583.Formatters.Binary`
+
+Standard binary ISO 8583 format:
+- Binary MTI (4 bytes)
+- Binary bitmap (8 or 16 bytes)
+- BCD/ASCII encoded fields
+
+```elixir
+# Encode
+iso_msg = ISOMsg.new("0200", %{2 => "1234567890123456789", 4 => "000000001234"})
+raw_binary = Iso8583.Formatters.Binary.encode(iso_msg)
+
+# Decode
+{:ok, iso_msg} = Iso8583.Formatters.Binary.decode(raw_binary)
+```
+
+#### `Iso8583.Formatters.AsciiHex`
+
+ASCII hex format commonly used by legacy systems:
+- ASCII MTI (4 characters)
+- ASCII hex bitmap (16 or 32 hex characters)
+- ASCII encoded fields
+
+```elixir
+# Encode
+iso_msg = ISOMsg.new("0200", %{2 => "1234567890123456789", 4 => "000000001234"})
+raw_binary = Iso8583.Formatters.AsciiHex.encode(iso_msg)
+
+# Decode
+{:ok, iso_msg} = Iso8583.Formatters.AsciiHex.decode(raw_binary)
+```
+
+### ISOMsg Helper Functions
+
+The `ISOMsg` module provides helper functions for working with ISO messages:
+
+```elixir
+# Create new ISOMsg
+iso_msg = ISOMsg.new("0200", %{2 => "1234567890123456789", 4 => "000000001234"})
+
+# Get/set MTI
+mti = ISOMsg.get_mti(iso_msg)  # => "0200"
+iso_msg = ISOMsg.set_mti(iso_msg, "0210")
+
+# Get/set fields
+pan = ISOMsg.get_field(iso_msg, 2)  # => "1234567890123456789"
+iso_msg = ISOMsg.set_field(iso_msg, 39, "00")  # Set response code
+
+# Check for fields
+ISOMsg.has_field?(iso_msg, 2)  # => true
+ISOMsg.fields(iso_msg)  # => [2, 4]
+
+# Convert struct to/from ISOMsg
+defmodule SaleRequest do
+  defstruct [:pan, :amount, :stan]
+
+  def __iso_field_map__, do: %{2 => :pan, 4 => :amount, 11 => :stan}
+  def __iso_mti__, do: "0200"
+end
+
+request = %SaleRequest{pan: "123456...", amount: "1000", stan: "000001"}
+
+# Struct -> ISOMsg
+iso_msg = ISOMsg.from_struct(request, "0200", %{2 => :pan, 4 => :amount, 11 => :stan})
+
+# ISOMsg -> Struct
+request = ISOMsg.to_struct(iso_msg, SaleRequest, %{2 => :pan, 4 => :amount, 11 => :stan})
+```
+
+### Iso8583.Client - High-Level Transaction API
+
+The `Iso8583.Client` module provides a simplified API for sending transactions with automatic encoding/decoding and response correlation.
+
+#### Define Your Transaction Struct
+
+```elixir
+defmodule MyApp.SaleRequest do
+  defstruct [:pan, :amount, :stan, :terminal_id]
+
+  # Formatter to use for encoding/decoding
+  def __iso_formatter__, do: Iso8583.Formatters.Binary
+
+  # Map ISO field numbers to struct fields
+  def __iso_field_map__, do: %{
+    2 => :pan,
+    4 => :amount,
+    11 => :stan,
+    41 => :terminal_id
+  }
+
+  # Default MTI for this transaction type
+  def __iso_mti__, do: "0200"
+end
+
+defmodule MyApp.SaleResponse do
+  defstruct [:response_code, :amount, :stan, :auth_code]
+
+  def __iso_formatter__, do: Iso8583.Formatters.Binary
+  def __iso_field_map__, do: %{
+    39 => :response_code,
+    4 => :amount,
+    11 => :stan,
+    38 => :auth_code
+  }
+
+  def __iso_response_module__, do: __MODULE__
+end
+```
+
+#### Start the Client in Your Supervision Tree
+
+```elixir
+defmodule MyApp.Application do
+  use Application
+
+  def start(_type, _args) do
+    children = [
+      # Backend client with Binary formatter
+      {Iso8583.Client, name: :backend,
+       transport: Iso8583.Transport.TCP.Client,
+       transport_opts: [
+         host: "backend.example.com",
+         port: 9000,
+         framing: {:length_prefix, 2}
+       ],
+       formatter: Iso8583.Formatters.Binary,
+       request_timeout: 30000},
+
+      # Terminal client with ASCII Hex formatter (different format!)
+      {Iso8583.Client, name: :terminal_acquirer,
+       transport: Iso8583.Transport.TCP.Client,
+       transport_opts: [
+         host: "acquirer.example.com",
+         port: 9100,
+         framing: {:length_prefix, 2}
+       ],
+       formatter: Iso8583.Formatters.AsciiHex,
+       request_timeout: 30000}
+    ]
+
+    opts = [strategy: :one_for_one]
+    Supervisor.start_link(children, opts)
+  end
+end
+```
+
+#### Send Transactions
+
+```elixir
+# Create request
+request = %SaleRequest{
+  pan: "1234567890123456789",
+  amount: "000000001234",
+  stan: "000001",
+  terminal_id: "12345678"
+}
+
+# Send to backend - automatically encodes using configured formatter
+case Iso8583.Client.send_transaction(:backend, request) do
+  {:ok, %SaleResponse{response_code: "00"} = response} ->
+    Logger.info("Transaction approved", auth_code: response.auth_code)
+
+  {:ok, %SaleResponse{response_code: code}} ->
+    Logger.warning("Transaction declined: #{code}")
+
+  {:error, reason} ->
+    Logger.error("Transaction failed: #{inspect(reason)}")
+end
+```
+
+### Proxy/Gateway Pattern
+
+The Formatter + Client combination is ideal for building proxy/gateway applications that translate between different wire formats:
+
+```elixir
+defmodule MyApp.Gateway do
+  use GenServer
+
+  # Handle request from terminal (Binary format)
+  def handle_terminal_request(raw_binary, context) do
+    # Decode using terminal's formatter
+    {:ok, iso_msg} = Iso8583.Formatters.Binary.decode(raw_binary)
+
+    # Convert to struct
+    request = ISOMsg.to_struct(iso_msg, SaleRequest, %{
+      2 => :pan, 4 => :amount, 11 => :stan, 41 => :terminal_id
+    })
+
+    # Transform if needed
+    request = %{request | amount: transform_amount(request.amount)}
+
+    # Send to backend (uses configured formatter - could be AsciiHex!)
+    Iso8583.Client.send_transaction(:backend, request)
+  end
+
+  # Handle response from backend (decode to struct)
+  def handle_backend_response(%SaleResponse{} = response) do
+    # Transform response if needed
+    response = %{response | response_code: map_code(response.response_code)}
+
+    # Send back to terminal
+    iso_msg = ISOMsg.from_struct(response, "0210", %{
+      39 => :response_code, 4 => :amount, 11 => :stan, 38 => :auth_code
+    })
+
+    raw_binary = Iso8583.Formatters.Binary.encode(iso_msg)
+    # Send via transport...
+  end
+
+  defp transform_amount(amount), do: amount
+  defp map_code("00"), do: "00"
+  defp map_code(_), do: "05"
+end
+```
+
+**Key benefits:**
+- Work with structured data instead of raw binaries
+- Automatic request/response correlation using STAN (field 11)
+- Different formatters for different backends
+- Clean separation of business logic from wire format
 
 ## Installation
 
