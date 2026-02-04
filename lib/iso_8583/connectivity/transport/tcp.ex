@@ -640,7 +640,7 @@ defmodule Iso8583.Transport.TCP.Client do
           transport_opts: [
             host: "acquirer.example.com",
             port: 9000,
-            reconnect_interval: 5000
+            packet_handler: {:length_prefix, 2}
           ]
       end
 
@@ -653,6 +653,35 @@ defmodule Iso8583.Transport.TCP.Client do
   | `:name` | `atom()` | `nil` | Name for registration |
   | `:reconnect_interval` | `integer()` | `5000` | Reconnect delay on disconnect (ms) |
   | `:timeout` | `integer()` | `60000` | Socket timeout (ms) |
+  | `:packet_handler` | `atom() \| tuple()` | `:raw` | How to frame messages |
+
+  ## Packet Handlers (Framing)
+
+  ### `:raw` (default)
+  Sends and receives raw data without framing. Use when:
+  - The server handles framing externally
+  - You need complete control over message format
+
+  ### `{:length_prefix, bytes}` - **Recommended for ISO 8583**
+  Automatically frames messages with a big-endian (network order) length prefix.
+  Best for:
+  - Standard ISO 8583 over TCP
+  - Connecting to servers that expect length-prefixed messages
+
+  Example: `packet_handler: {:length_prefix, 2}` means:
+  - Outgoing: prepends 2-byte length before sending
+  - Incoming: parses 2-byte length to read complete messages
+
+  **Message flow:**
+  ```
+  Client -> Server: [Len Hi] [Len Lo] [ISO Message Data...]
+  Server -> Client: [Len Hi] [Len Lo] [ISO Response Data...]
+  ```
+
+  **Supported prefix sizes:**
+  - `{:length_prefix, 1}` - 1 byte length (max: 255 bytes)
+  - `{:length_prefix, 2}` - 2 bytes length (max: 65,535 bytes) - **Most common**
+  - `{:length_prefix, 4}` - 4 bytes length (max: 4,294,967,295 bytes)
 
   ## Context Metadata
 
@@ -680,7 +709,9 @@ defmodule Iso8583.Transport.TCP.Client do
     :connection_time,
     :bytes_sent,
     :bytes_received,
-    :pending_requests
+    :pending_requests,
+    :packet_handler,
+    :buffer
   ]
 
   @doc """
@@ -735,9 +766,10 @@ defmodule Iso8583.Transport.TCP.Client do
     port = Keyword.fetch!(opts, :port)
     reconnect_interval = Keyword.get(opts, :reconnect_interval, 5000)
     timeout = Keyword.get(opts, :timeout, 60_000)
+    packet_handler = Keyword.get(opts, :packet_handler, :raw)
 
     # Try to connect immediately
-    send(self(), :connect)
+    :erlang.send(self(), :connect)
 
     {:ok,
      %__MODULE__{
@@ -745,11 +777,13 @@ defmodule Iso8583.Transport.TCP.Client do
        port: port,
        reconnect_interval: reconnect_interval,
        timeout: timeout,
+       packet_handler: packet_handler,
        socket: nil,
        connection_time: nil,
        bytes_sent: 0,
        bytes_received: 0,
-       pending_requests: %{}
+       pending_requests: %{},
+       buffer: <<>>
      }}
   end
 
@@ -774,40 +808,44 @@ defmodule Iso8583.Transport.TCP.Client do
 
   @impl true
   def handle_info(:receive, state) when state.socket != nil do
-    case :gen_tcp.recv(state.socket, 0, state.timeout) do
-      {:ok, data} ->
-        if state.receive_callback do
-          context =
-            Context.new(
-              transport_ref: :client,
-              client_id: "tcp_client",
-              peer_address: state.host,
-              transport_metadata: %{
-                connection_time: state.connection_time,
-                bytes_sent: state.bytes_sent,
-                bytes_received: state.bytes_received
-              }
-            )
+    case recv_and_parse(state) do
+      {:ok, messages, new_buffer, bytes_received} ->
+        # Process each received message
+        Enum.each(messages, fn data ->
+          if state.receive_callback do
+            context =
+              Context.new(
+                transport_ref: :client,
+                client_id: "tcp_client",
+                peer_address: state.host,
+                transport_metadata: %{
+                  connection_time: state.connection_time,
+                  bytes_sent: state.bytes_sent,
+                  bytes_received: state.bytes_received
+                }
+              )
 
-          state.receive_callback.(data, context)
-        end
+            state.receive_callback.(data, context)
+          end
+        end)
 
-        send(self(), :receive)
-        {:noreply, %{state | bytes_received: state.bytes_received + byte_size(data)}}
+        # Continue receiving
+        :erlang.send(self(), :receive)
+        {:noreply, %{state | buffer: new_buffer, bytes_received: state.bytes_received + bytes_received}}
 
       {:error, :timeout} ->
-        send(self(), :receive)
+        :erlang.send(self(), :receive)
         {:noreply, state}
 
       {:error, :closed} ->
         Logger.warning("Connection closed to #{state.host}:#{state.port}")
-        send(self(), :connect)
-        {:noreply, %{state | socket: nil, connection_time: nil}}
+        :erlang.send(self(), :connect)
+        {:noreply, %{state | socket: nil, connection_time: nil, buffer: <<>>}}
 
       {:error, reason} ->
         Logger.error("Receive error: #{inspect(reason)}")
-        send(self(), :connect)
-        {:noreply, %{state | socket: nil, connection_time: nil}}
+        :erlang.send(self(), :connect)
+        {:noreply, %{state | socket: nil, connection_time: nil, buffer: <<>>}}
     end
   end
 
@@ -820,9 +858,12 @@ defmodule Iso8583.Transport.TCP.Client do
   @impl true
   def handle_call({:send, data}, _from, state) do
     if state.socket do
-      case :gen_tcp.send(state.socket, data) do
+      # Frame the data if using length_prefix
+      framed_data = frame_data(data, state.packet_handler)
+
+      case :gen_tcp.send(state.socket, framed_data) do
         :ok ->
-          {:reply, :ok, %{state | bytes_sent: state.bytes_sent + byte_size(data)}}
+          {:reply, :ok, %{state | bytes_sent: state.bytes_sent + byte_size(framed_data)}}
 
         {:error, reason} ->
           {:reply, {:error, reason}, state}
@@ -867,6 +908,69 @@ defmodule Iso8583.Transport.TCP.Client do
 
       _ ->
         {:error, :nxdomain}
+    end
+  end
+
+  # Framing and parsing helpers
+
+  defp frame_data(data, packet_handler) do
+    case packet_handler do
+      {:length_prefix, prefix_bytes} when prefix_bytes in [1, 2, 4] ->
+        length = byte_size(data)
+        <<length::big-integer-size(prefix_bytes * 8), data::binary>>
+
+      _ ->
+        data
+    end
+  end
+
+  defp recv_and_parse(state) do
+    case :gen_tcp.recv(state.socket, 0, state.timeout) do
+      {:ok, data} ->
+        new_buffer = state.buffer <> data
+
+        case state.packet_handler do
+          {:length_prefix, prefix_bytes} when prefix_bytes in [1, 2, 4] ->
+            extract_messages(new_buffer, prefix_bytes, [])
+
+          :raw ->
+            {:ok, [new_buffer], <<>>, byte_size(new_buffer)}
+
+          _ ->
+            {:ok, [new_buffer], <<>>, byte_size(new_buffer)}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp extract_messages(buffer, prefix_bytes, acc) do
+    prefix_size = prefix_bytes
+
+    if byte_size(buffer) < prefix_size do
+      # Not enough data for length prefix
+      if acc == [] do
+        {:error, :timeout}
+      else
+        {:ok, Enum.reverse(acc), buffer, 0}
+      end
+    else
+      # Extract the message length (big-endian)
+      <<msg_length::big-integer-size(prefix_bytes * 8), rest::binary>> = buffer
+
+      if byte_size(rest) >= msg_length do
+        # Extract complete message
+        <<message::binary-size(msg_length), remaining::binary>> = rest
+        extract_messages(remaining, prefix_bytes, [message | acc])
+      else
+        # Incomplete message, wait for more data
+        if acc == [] do
+          {:error, :timeout}
+        else
+          {:ok, Enum.reverse(acc), buffer, 0}
+        end
+      end
     end
   end
 end
