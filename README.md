@@ -21,6 +21,14 @@ Ex_Iso8583
     +-- TransactionProcessor - Pure functional transaction processing DSL
          +-- Middleware       - Logging, timing, validation, transformation
          +-- TimeoutWrapper   - Timeout handling with automatic timeout response
+    |
+    +-- Iso8583.Connectivity - Transport abstraction layer
+         +-- Context          - Struct for transport metadata
+         +-- Transport        - Behaviour for transport implementations
+         +-- Handler          - Generic handler connecting processor + transport
+         +-- Transport.TCP    - TCP Server and Client implementations
+         +-- Transport.HTTP   - HTTP Server and Client implementations (planned)
+         +-- Transport.UDP    - UDP Server and Client implementations (planned)
 ```
 
 ### Core Modules
@@ -411,6 +419,183 @@ When a timeout occurs:
 - Task isolation for clean termination
 - Transaction type detection from MTI + processing code
 - No modification to TransactionProcessor required (wrapper pattern)
+
+## Connectivity Layer
+
+The connectivity layer provides **transport abstraction** - decoupling how ISO 8583 messages are transferred from your business logic.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     Your Application                         │
+└─────────────────────────────────────────────────────────────┘
+                              │
+              ┌───────────────┴───────────────┐
+              │                               │
+      ┌───────────────┐               ┌───────────────┐
+      │  TCP Server   │               │  HTTP Server  │
+      │  (Terminals)  │               │  (REST API)   │
+      └───────────────┘               └───────────────┘
+              │                               │
+              └───────────────┬───────────────┘
+                              │
+              ┌───────────────────────────────────────┐
+              │        Iso8583.Handler                │
+              │  - Pluggable Transport               │
+              │  - Your TransactionProcessor         │
+              └───────────────────────────────────────┘
+                              │
+              ┌───────────────────────────────────────┐
+              │    TransactionProcessor               │
+              │    (Your business logic)              │
+              └───────────────────────────────────────┘
+```
+
+### Iso8583.Handler
+
+The `Iso8583.Handler` module provides a `use` macro that creates a GenServer handler connecting your processor with any transport:
+
+```elixir
+defmodule MyApp.PaymentHandler do
+  use Iso8583.Handler,
+    processor: MyApp.PaymentProcessor,
+    transport: Iso8583.Transport.TCP.Server,
+    transport_opts: [
+      port: 8080,
+      acceptors: 10
+    ]
+end
+```
+
+Add to your supervision tree:
+
+```elixir
+defmodule MyApp.Application do
+  use Application
+
+  def start(_type, _args) do
+    children = [
+      # TCP Server - accepts connections from terminals
+      MyApp.PaymentHandler,
+
+      # HTTP Server - for REST API
+      {Iso8583.Handler,
+       processor: MyApp.PaymentProcessor,
+       transport: Iso8583.Transport.HTTP.Server,
+       transport_opts: [port: 4000]},
+
+      # TCP Client - connects to upstream acquirer
+      {Iso8583.Handler,
+       processor: MyApp.UpstreamProcessor,
+       transport: Iso8583.Transport.TCP.Client,
+       transport_opts: [
+         host: "acquirer.example.com",
+         port: 9000
+       ]}
+    ]
+
+    opts = [strategy: :one_for_one]
+    Supervisor.start_link(children, opts)
+  end
+end
+```
+
+### Available Transports
+
+| Transport | Type | Description |
+|-----------|------|-------------|
+| `Iso8583.Transport.TCP.Server` | Server | Accept TCP connections from clients |
+| `Iso8583.Transport.TCP.Client` | Client | Connect to TCP server |
+| `Iso8583.Transport.UDP.Server` | Server | Receive UDP datagrams |
+| `Iso8583.Transport.UDP.Client` | Client | Send UDP datagrams |
+| `Iso8583.Transport.HTTP.Server` | Server | HTTP server (Plug/Bandit) |
+| `Iso8583.Transport.HTTP.Client` | Client | HTTP client (Finch/Req) |
+
+### TCP Server Transport
+
+Accepts TCP connections and receives ISO 8583 messages:
+
+```elixir
+defmodule MyApp.TerminalHandler do
+  use Iso8583.Handler,
+    processor: MyApp.PaymentProcessor,
+    transport: Iso8583.Transport.TCP.Server,
+    transport_opts: [
+      port: 8080,           # Port to listen on
+      acceptors: 10,         # Number of acceptor processes
+      packet_handler: :raw,  # How to parse messages (:raw, :line, {:size, bytes})
+      timeout: 60000         # Connection idle timeout (ms)
+    ]
+end
+```
+
+**Packet Handlers:**
+- `:raw` - Read entire socket buffer (default)
+- `:line` - Read until newline
+- `{:size, bytes}` - Read fixed-size messages
+
+### TCP Client Transport
+
+Connects to a remote TCP server:
+
+```elixir
+defmodule MyApp.UpstreamHandler do
+  use Iso8583.Handler,
+    processor: MyApp.UpstreamProcessor,
+    transport: Iso8583.Transport.TCP.Client,
+    transport_opts: [
+      host: "acquirer.example.com",
+      port: 9000,
+      reconnect_interval: 5000,  # Reconnect delay on disconnect (ms)
+      timeout: 60000
+    ]
+end
+```
+
+### Iso8583.Context
+
+The context carries transport-specific metadata alongside messages:
+
+```elixir
+# Fields in context
+%Iso8583.Context{
+  transport_ref: socket,        # Transport-specific reference
+  client_id: "client_123",      # Optional client identifier
+  peer_address: {192, 168, 1, 100},  # Client's IP address
+  request_id: "req-abc123",     # Correlation ID for tracing
+  transport_metadata: %{        # Transport-specific data
+    connection_time: 1234567890,
+    bytes_received: 1024
+  }
+}
+```
+
+### Custom Transport
+
+Implement your own transport by using the `Iso8583.Transport` behaviour:
+
+```elixir
+defmodule MyCustomTransport do
+  @behaviour Iso8583.Transport
+
+  def start_link(opts) do
+    # Start your transport
+  end
+
+  def send(transport_ref, data) do
+    # Send data
+  end
+
+  def set_receive_callback(pid, callback) do
+    # Register callback for incoming messages
+  end
+
+  def stop(pid) do
+    # Stop transport
+  end
+end
+```
 
 ## Installation
 
