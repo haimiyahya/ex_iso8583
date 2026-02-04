@@ -392,13 +392,16 @@ defmodule Iso8583.Client do
     # Get formatter and field map from request struct
     formatter = get_formatter(request, state.formatter)
     field_map = get_field_map(request)
+    field_defs = get_field_definitions(request)
 
     # Convert struct to ISOMsg
     mti = get_mti(request)
     iso_msg = ISOMsg.from_struct(request, mti, field_map)
 
-    # Encode using formatter
-    case formatter.encode(iso_msg) do
+    # Encode using formatter with field definitions
+    encode_opts = if field_defs, do: [field_definitions: field_defs], else: []
+
+    case formatter.encode(iso_msg, encode_opts) do
       raw_binary when is_binary(raw_binary) ->
         # Get STAN for correlation
         stan = Map.get(request, :stan) || ISOMsg.get_field(iso_msg, 11)
@@ -422,7 +425,12 @@ defmodule Iso8583.Client do
   end
 
   def handle_call({:send_raw, %ISOMsg{} = iso_msg}, _from, state) do
-    case state.formatter.encode(iso_msg) do
+    # Get field definitions from config if available
+    field_defs = get_field_definitions_from_config(state)
+
+    encode_opts = if field_defs, do: [field_definitions: field_defs], else: []
+
+    case state.formatter.encode(iso_msg, encode_opts) do
       raw_binary when is_binary(raw_binary) ->
         send_via_transport(state.transport, state.transport_pid, raw_binary)
         {:reply, :ok, state}
@@ -452,8 +460,13 @@ defmodule Iso8583.Client do
 
   @impl true
   def handle_info({:receive_response, raw_data, _context}, state) do
+    # Get field definitions for response decoding
+    field_defs = get_field_definitions_from_config(state)
+
+    decode_opts = if field_defs, do: [field_definitions: field_defs], else: []
+
     # Decode response
-    case state.formatter.decode(raw_data) do
+    case state.formatter.decode(raw_data, decode_opts) do
       {:ok, %ISOMsg{} = iso_msg} ->
         stan = ISOMsg.get_field(iso_msg, 11)
 
@@ -518,6 +531,19 @@ defmodule Iso8583.Client do
     else
       Map.get(request, :mti, "0200")
     end
+  end
+
+  defp get_field_definitions(request) do
+    if function_exported?(request.__struct__, :__iso_field_definitions__, 0) do
+      request.__struct__.__iso_field_definitions__()
+    else
+      nil
+    end
+  end
+
+  defp get_field_definitions_from_config(_state) do
+    # Could be extended to read from client config
+    nil
   end
 
   defp send_via_transport(transport, transport_pid, data) do

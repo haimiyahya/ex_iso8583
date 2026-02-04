@@ -33,6 +33,19 @@ defmodule Iso8583.Formatters.AsciiHex do
       # Decode back
       {:ok, iso_msg2} = Iso8583.Formatters.AsciiHex.decode(binary)
 
+  ### Encoding with field definitions
+
+      # Use field definitions for proper field encoding
+      field_defs = Iso8583.FieldDefinition.standard_fields()
+
+      iso_msg = ISOMsg.new("0200", %{2 => "1234567890123456789", 4 => "000000001234"})
+      binary = Iso8583.Formatters.AsciiHex.encode(iso_msg, field_definitions: field_defs)
+
+  ### Decoding with field definitions
+
+      field_defs = Iso8583.FieldDefinition.standard_fields()
+      {:ok, iso_msg} = Iso8583.Formatters.AsciiHex.decode(binary, field_definitions: field_defs)
+
   ### Converting between Binary and ASCII Hex formats
 
       # Decode from Binary, encode to ASCII Hex
@@ -52,6 +65,7 @@ defmodule Iso8583.Formatters.AsciiHex do
         def __iso_formatter__, do: Iso8583.Formatters.AsciiHex
         def __iso_field_map__, do: %{2 => :pan, 4 => :amount, 11 => :stan}
         def __iso_mti__, do: "0200"
+        def __iso_field_definitions__, do: Iso8583.FieldDefinition.only([2, 4, 11])
       end
 
       # Configure client for legacy backend
@@ -65,10 +79,25 @@ defmodule Iso8583.Formatters.AsciiHex do
 
   """
 
+  @behaviour Iso8583.Formatter
+
+  alias ISOMsg
+  alias IsoBitmap
+  alias IsoField
+  alias Iso8583.FieldDefinition
+
+  @default_header_type :ascii
+
   @doc """
   Encodes an ISOMsg to ASCII hex format.
+
+  ## Options
+
+  - `:field_definitions` - Map of field number to field definition tuples.
+    If not provided, returns MTI + hex bitmap only (no field data).
+
   """
-  def encode(%ISOMsg{} = iso_msg) do
+  def encode(%ISOMsg{} = iso_msg, opts \\ []) do
     mti = ISOMsg.get_mti(iso_msg)
     data = ISOMsg.get_data(iso_msg)
 
@@ -78,24 +107,40 @@ defmodule Iso8583.Formatters.AsciiHex do
     # Convert bitmap to ASCII hex
     hex_bitmap = Base.encode16(bitmap, case: :upper)
 
-    mti <> hex_bitmap <> encode_fields(data)
+    # Encode fields if field definitions provided
+    fields_data = encode_fields(data, opts)
+
+    mti <> hex_bitmap <> fields_data
   end
 
   @doc """
   Decodes an ASCII hex format message to ISOMsg.
+
+  ## Options
+
+  - `:field_definitions` - Map of field number to field definition tuples.
+    If not provided, only MTI and bitmap are decoded (fields remain empty).
+
   """
-  def decode(raw) when is_binary(raw) and byte_size(raw) >= 20 do
+  def decode(raw, opts \\ [])
+
+  def decode(raw, opts) when is_binary(raw) and byte_size(raw) >= 20 do
     # Extract MTI (4 ASCII characters = 4 bytes)
     <<mti::bytes-size(4), rest::binary>> = raw
 
-    # Extract and parse bitmap (16 or 32 hex chars)
+    # Extract and parse hex bitmap
     case extract_hex_bitmap(rest) do
       {:ok, bitmap, field_data} ->
         # Get present field list from bitmap
         field_list = IsoBitmap.bitmap_to_list(bitmap)
 
         # Parse fields
-        data = parse_fields(field_data, field_list -- [1], %{})
+        data = if opts[:field_definitions] do
+          parse_fields(field_data, field_list -- [1], opts[:field_definitions])
+        else
+          # Return raw remaining data if no field definitions
+          parse_fields_simple(field_list, field_data)
+        end
 
         {:ok, ISOMsg.new(mti, data)}
 
@@ -104,7 +149,7 @@ defmodule Iso8583.Formatters.AsciiHex do
     end
   end
 
-  def decode(_raw), do: {:error, :invalid_message}
+  def decode(_raw, _opts), do: {:error, :invalid_message}
 
   # Extract ASCII hex bitmap and remaining data
   defp extract_hex_bitmap(<<first_byte::utf8, _rest::binary>> = data) when first_byte in ?0..?9
@@ -131,19 +176,62 @@ defmodule Iso8583.Formatters.AsciiHex do
 
   defp extract_hex_bitmap(_), do: {:error, :invalid_bitmap}
 
-  # Parse fields from binary data
-  defp parse_fields(<<>>, [], acc), do: acc
+  # Encode fields using field definitions (ASCII encoded)
+  defp encode_fields(data, opts) do
+    field_defs = Keyword.get(opts, :field_definitions, %{})
 
-  defp parse_fields(data, [_field_num | rest], acc) do
-    # Simplified - proper implementation would use field definitions
-    parse_fields(data, rest, acc)
+    # Sort fields by number for consistent encoding
+    data
+    |> Enum.sort_by(fn {field_num, _} -> field_num end)
+    |> Enum.reduce(<<>>, fn {field_num, value}, acc ->
+      case Map.get(field_defs, field_num) do
+        nil ->
+          # No definition, skip this field
+          acc
+
+        field_def ->
+          acc <> encode_field(field_num, value, field_def, opts)
+      end
+    end)
   end
 
-  defp parse_fields(data, [], acc), do: Map.put(acc, :raw_remaining, data)
+  # Encode a single field in ASCII format
+  defp encode_field(field_num, value, field_def, _opts) do
+    {field_num, iso_field_format} = FieldDefinition.to_iso_field_format({field_num, field_def})
 
-  # Encode fields to binary (ASCII format)
-  defp encode_fields(_data) do
-    # For now, return empty - proper implementation would use field definitions
-    <<>>
+    # For ASCII Hex format, fields are typically ASCII encoded
+    # Use ASCII header type for variable length fields
+    IsoField.form_field({field_num, iso_field_format}, value, :ascii)
+  end
+
+  # Parse fields using field definitions
+  defp parse_fields(field_data, field_list, field_defs) do
+    parse_fields(field_data, field_list, field_defs, %{})
+  end
+
+  defp parse_fields(<<>>, [], _field_defs, acc), do: acc
+
+  defp parse_fields(data, [field_num | rest], field_defs, acc) do
+    case Map.get(field_defs, field_num) do
+      nil ->
+        # No definition for this field, skip
+        parse_fields(data, rest, field_defs, acc)
+
+      field_def ->
+        {field_num, iso_field_format} = FieldDefinition.to_iso_field_format({field_num, field_def})
+
+        # ASCII Hex format uses ASCII headers for variable-length fields
+        case IsoField.extract_field({field_num, iso_field_format}, {acc, data}, :ascii) do
+          {updated_acc, remaining} ->
+            parse_fields(remaining, rest, field_defs, updated_acc)
+        end
+    end
+  end
+
+  defp parse_fields(data, [], _field_defs, acc), do: Map.put(acc, :raw_remaining, data)
+
+  # Simple parse without field definitions - just return empty map
+  defp parse_fields_simple(_field_list, field_data) do
+    %{raw_remaining: field_data}
   end
 end
