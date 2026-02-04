@@ -781,6 +781,566 @@ defmodule Iso8583.Transport.WebSocket.Socket do
   end
 end
 
+defmodule Iso8583.Transport.WebSocket.Client do
+  @moduledoc """
+  WebSocket Client transport for ISO 8583 messages.
+
+  Connects to a WebSocket server and sends/receives ISO 8583 messages with
+  2-byte length-prefix framing.
+
+  ## Usage
+
+      defmodule MyApp.WSClientHandler do
+        use Iso8583.Handler,
+          processor: MyApp.PaymentProcessor,
+          transport: Iso8583.Transport.WebSocket.Client,
+          transport_opts: [
+            url: "ws://localhost:4000/iso8583/ws"
+          ]
+      end
+
+  ## Options
+
+  | Option | Type | Default | Description |
+  |--------|------|---------|-------------|
+  | `:url` | `String.t()` | Required | WebSocket URL (ws:// or wss://) |
+  | `:name` | `atom()` | `nil` | Name for registration |
+  | `:reconnect_interval` | `integer()` | `5000` | Reconnect delay on disconnect (ms) |
+  | `:timeout` | `integer()` | `60000` | Connection timeout (ms) |
+  | `:prefix_bytes` | `1 \\| 2 \\| 4` | `2` | Length prefix bytes for framing |
+  | `:headers` | `map()` | `%{}` | Additional headers for handshake |
+
+  ## Message Framing
+
+  All messages use length-prefix framing (default: 2 bytes).
+
+  **Client to Server:**
+  ```
+  +--------+--------+--------------------------+
+  | Len Hi | Len Lo |     ISO 8583 Message     |
+  +--------+--------+--------------------------+
+  ```
+
+  **Server to Client:**
+  ```
+  +--------+--------+--------------------------+
+  | Len Hi | Len Lo |     ISO 8583 Response    |
+  +--------+--------+--------------------------+
+  ```
+
+  ## Context Metadata
+
+  The client populates `Iso8583.Context` with:
+  - `transport_ref` - `:client` (atom identifier)
+  - `client_id` - `"ws_client"`
+  - `peer_address` - Server's host and port
+  - `transport_metadata` - `%{url, connection_time, bytes_sent, bytes_received}`
+
+  ## Example
+
+      # Connect to WebSocket server
+      {:ok, client} = Iso8583.Transport.WebSocket.Client.start_link(
+        url: "ws://localhost:4000/iso8583/ws"
+      )
+
+      # Set callback for incoming messages
+      Iso8583.Transport.WebSocket.Client.set_receive_callback(client, fn
+        data, _context ->
+          # Process ISO 8583 response
+          IO.inspect("Received: \#{Base.encode16(data)}")
+      end)
+
+      # Send ISO message (automatically framed with length prefix)
+      iso_message = <<0x02, 0x00, 0xB2, 0x20, ...>>
+      Iso8583.Transport.WebSocket.Client.send(:client, iso_message)
+  """
+
+  use GenServer
+  require Logger
+  import Kernel, except: [send: 2]
+
+  alias Iso8583.Context
+
+  defstruct [
+    :socket,
+    :url,
+    :host,
+    :port,
+    :path,
+    :scheme,
+    :receive_callback,
+    :reconnect_interval,
+    :timeout,
+    :prefix_bytes,
+    :headers,
+    :connection_time,
+    :bytes_sent,
+    :bytes_received,
+    :buffer
+  ]
+
+  @doc """
+  Starts the WebSocket client transport.
+  """
+  def start_link(opts) do
+    GenServer.start_link(__MODULE__, opts)
+  end
+
+  @doc """
+  Returns the child spec for supervision.
+  """
+  def child_spec(opts) do
+    %{
+      id: __MODULE__,
+      start: {__MODULE__, :start_link, [opts]},
+      restart: :permanent,
+      type: :worker
+    }
+  end
+
+  @doc """
+  Sends data to the WebSocket server.
+  """
+  def send(:client, data) do
+    GenServer.call(__MODULE__, {:send, data})
+  end
+
+  def send(pid, data) when is_pid(pid) do
+    GenServer.call(pid, {:send, data})
+  end
+
+  @doc """
+  Registers the callback for receiving messages.
+  """
+  def set_receive_callback(client_pid, callback) when is_pid(client_pid) do
+    GenServer.call(client_pid, {:set_callback, callback})
+  end
+
+  @doc """
+  Stops the client.
+  """
+  def stop(client_pid) when is_pid(client_pid) do
+    GenServer.stop(client_pid, :normal)
+  end
+
+  # Server Callbacks
+
+  @impl true
+  def init(opts) do
+    url = Keyword.fetch!(opts, :url)
+    reconnect_interval = Keyword.get(opts, :reconnect_interval, 5000)
+    timeout = Keyword.get(opts, :timeout, 60_000)
+    prefix_bytes = Keyword.get(opts, :prefix_bytes, 2)
+    headers = Keyword.get(opts, :headers, %{})
+
+    # Parse URL
+    {scheme, host, port, path} = parse_url(url)
+
+    # Try to connect immediately
+    :erlang.send(self(), :connect)
+
+    {:ok,
+     %__MODULE__{
+       url: url,
+       scheme: scheme,
+       host: host,
+       port: port,
+       path: path,
+       reconnect_interval: reconnect_interval,
+       timeout: timeout,
+       prefix_bytes: prefix_bytes,
+       headers: headers,
+       socket: nil,
+       connection_time: nil,
+       bytes_sent: 0,
+       bytes_received: 0,
+       buffer: <<>>
+     }}
+  end
+
+  @impl true
+  def handle_info(:connect, state) do
+    case websocket_connect(state) do
+      {:ok, socket} ->
+        Logger.info("WebSocket connected to #{state.url}")
+
+        # Start receiving
+        :erlang.send(self(), :receive)
+
+        {:noreply,
+         %{state | socket: socket, connection_time: System.system_time(:millisecond),
+           buffer: <<>>}}
+
+      {:error, reason} ->
+        Logger.warning("Failed to connect to #{state.url}: #{inspect(reason)}")
+        Process.send_after(self(), :connect, state.reconnect_interval)
+        {:noreply, state}
+    end
+  end
+
+  @impl true
+  def handle_info(:receive, state) when state.socket != nil do
+    case recv_and_parse(state) do
+      {:ok, messages, new_buffer, bytes_received} ->
+        # Process each received message
+        Enum.each(messages, fn data ->
+          if state.receive_callback do
+            context = build_context(state)
+            state.receive_callback.(data, context)
+          end
+        end)
+
+        # Continue receiving
+        :erlang.send(self(), :receive)
+        {:noreply, %{state | buffer: new_buffer, bytes_received: state.bytes_received + bytes_received}}
+
+      {:error, :timeout} ->
+        :erlang.send(self(), :receive)
+        {:noreply, state}
+
+      {:error, :closed} ->
+        Logger.warning("WebSocket connection closed to #{state.url}")
+        :erlang.send(self(), :connect)
+        {:noreply, %{state | socket: nil, connection_time: nil, buffer: <<>>}}
+
+      {:error, reason} ->
+        Logger.error("WebSocket receive error: #{inspect(reason)}")
+        :erlang.send(self(), :connect)
+        {:noreply, %{state | socket: nil, connection_time: nil, buffer: <<>>}}
+    end
+  end
+
+  @impl true
+  def handle_info(:receive, state) do
+    # Not connected, wait for connect
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_call({:send, data}, _from, state) do
+    if state.socket do
+      # Frame the data with length prefix
+      framed_data = frame_data(data, state.prefix_bytes)
+
+      # Wrap in WebSocket binary frame
+      ws_frame = encode_websocket_frame(framed_data)
+
+      case :gen_tcp.send(state.socket, ws_frame) do
+        :ok ->
+          {:reply, :ok, %{state | bytes_sent: state.bytes_sent + byte_size(ws_frame)}}
+
+        {:error, reason} ->
+          {:reply, {:error, reason}, state}
+      end
+    else
+      {:reply, {:error, :not_connected}, state}
+    end
+  end
+
+  @impl true
+  def handle_call({:set_callback, callback}, _from, state) do
+    {:reply, :ok, %{state | receive_callback: callback}}
+  end
+
+  @impl true
+  def terminate(_reason, state) do
+    if state.socket do
+      # Send close frame
+      close_frame = <<0x88, 0>>
+      :gen_tcp.send(state.socket, close_frame)
+      :gen_tcp.close(state.socket)
+    end
+
+    :ok
+  end
+
+  # Private functions
+
+  defp parse_url(url) do
+    # Parse ws:// or wss:// URL
+    uri = URI.parse(url)
+
+    scheme = case uri.scheme do
+      "ws" -> :ws
+      "wss" -> :wss
+      _ -> :ws
+    end
+
+    port = case {scheme, uri.port} do
+      {:ws, nil} -> 80
+      {:wss, nil} -> 443
+      {_, port} -> port
+    end
+
+    path = uri.path || "/"
+
+    {scheme, uri.host, port, path}
+  end
+
+  defp websocket_connect(state) do
+    # Generate WebSocket key
+    key = :base64.encode(:crypto.strong_rand_bytes(16))
+
+    # Build handshake request
+    headers = [
+      {"Upgrade", "websocket"},
+      {"Connection", "Upgrade"},
+      {"Sec-WebSocket-Key", key},
+      {"Sec-WebSocket-Version", "13"}
+    ] ++ Map.to_list(state.headers)
+
+    request = [
+      "GET #{state.path} HTTP/1.1\r\n",
+      Enum.map(headers, fn {k, v} -> "#{k}: #{v}\r\n" end),
+      "\r\n"
+    ]
+
+    # Connect to server
+    host_charlist = to_charlist(state.host)
+    connect_opts = [:binary, packet: :raw, active: false]
+
+    case :gen_tcp.connect(host_charlist, state.port, connect_opts, state.timeout) do
+      {:ok, socket} ->
+        # Send handshake
+        request_str = :erlang.iolist_to_binary(request)
+        case :gen_tcp.send(socket, request_str) do
+          :ok ->
+            # Receive handshake response
+            case :gen_tcp.recv(socket, 0, state.timeout) do
+              {:ok, response} ->
+                case parse_handshake_response(response, key) do
+                  :ok ->
+                    {:ok, socket}
+
+                  {:error, reason} ->
+                    :gen_tcp.close(socket)
+                    {:error, reason}
+                end
+
+              {:error, reason} ->
+                :gen_tcp.close(socket)
+                {:error, reason}
+            end
+
+          {:error, reason} ->
+            :gen_tcp.close(socket)
+            {:error, reason}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp parse_handshake_response(response, key) do
+    # Parse HTTP response manually
+    case parse_http_response(response) do
+      {:ok, status_code, headers} ->
+        if status_code == 101 do
+          # Verify Sec-WebSocket-Accept
+          expected_accept =
+            :crypto.hash(:sha, key <> "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")
+            |> :base64.encode()
+
+          accept_header = get_header_value(headers, "sec-websocket-accept", "")
+
+          if accept_header == expected_accept do
+            :ok
+          else
+            {:error, :invalid_accept}
+          end
+        else
+          {:error, {:unexpected_status, status_code}}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp parse_http_response(response) do
+    # Parse HTTP response line and headers
+    case :binary.split(response, "\r\n") do
+      [status_line | header_lines] ->
+        # Parse status line: "HTTP/1.1 101 Switching Protocols"
+        case String.split(status_line, " ") do
+          [_, status_code, _] ->
+            {status_int, _} = Integer.parse(status_code)
+
+            # Parse headers
+            headers = parse_headers(header_lines, %{})
+            {:ok, status_int, headers}
+
+          _ ->
+            {:error, :invalid_status_line}
+        end
+
+      _ ->
+        {:error, :invalid_response}
+    end
+  end
+
+  defp parse_headers([], acc), do: acc
+
+  defp parse_headers(["" | _], acc), do: acc
+
+  defp parse_headers([line | rest], acc) do
+    case :binary.split(line, ":", 2) do
+      [key, value] ->
+        key_lower = String.downcase(String.trim(key))
+        parse_headers(rest, Map.put(acc, key_lower, String.trim(value)))
+
+      _ ->
+        parse_headers(rest, acc)
+    end
+  end
+
+  defp get_header_value(headers, key, default) do
+    Map.get(headers, String.downcase(key), default)
+  end
+
+  defp recv_and_parse(state) do
+    case :gen_tcp.recv(state.socket, 0, state.timeout) do
+      {:ok, data} ->
+        # Decode WebSocket frames
+        case decode_websocket_frames(data, state.buffer) do
+          {:ok, messages, new_buffer} ->
+            # Extract ISO messages from each frame
+            {iso_messages, total_bytes} = extract_iso_messages(messages, state.prefix_bytes, [], 0)
+            {:ok, iso_messages, new_buffer, total_bytes}
+
+          {:error, reason} ->
+            {:error, reason}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp decode_websocket_frames(data, buffer) do
+    combined = buffer <> data
+    decode_frames(combined, [])
+  end
+
+  defp decode_frames(<<>>, acc), do: {:ok, Enum.reverse(acc), <<>>}
+
+  defp decode_frames(data, acc) do
+    case decode_single_frame(data) do
+      {:ok, frame_payload, remaining} ->
+        decode_frames(remaining, [frame_payload | acc])
+
+      {:error, :incomplete} ->
+        {:ok, Enum.reverse(acc), data}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp decode_single_frame(<<_fin::1, _rsv1::1, _rsv2::1, _rsv3::1, _opcode::4, mask::1, _::7, rest::binary>>) do
+    # Decode payload length
+    case rest do
+      <<payload_len::7, mask_key::32, payload::binary-size(payload_len), remaining::binary>>
+          when mask == 1 and payload_len < 126 ->
+        # Unmask payload
+        unmasked = unmask_payload(payload, mask_key, <<>>)
+        {:ok, unmasked, remaining}
+
+      <<126::7, payload_len::16, mask_key::32, payload::binary-size(payload_len), remaining::binary>>
+          when mask == 1 ->
+        unmasked = unmask_payload(payload, mask_key, <<>>)
+        {:ok, unmasked, remaining}
+
+      <<127::7, payload_len::64, mask_key::32, payload::binary-size(payload_len), remaining::binary>>
+          when mask == 1 ->
+        # Only support up to 32-bit length for practical purposes
+        if payload_len <= 4_294_967_295 do
+          unmasked = unmask_payload(payload, mask_key, <<>>)
+          {:ok, unmasked, remaining}
+        else
+          {:error, :payload_too_large}
+        end
+
+      _ ->
+        {:error, :incomplete}
+    end
+  end
+
+  defp decode_single_frame(_), do: {:error, :incomplete}
+
+  defp unmask_payload(<<>>, _mask_key, acc), do: acc
+
+  defp unmask_payload(<<byte::8, rest::binary>>, <<mask_key::32, remaining_mask::binary>>, acc) do
+    unmasked = Bitwise.bxor(byte, mask_key)
+    unmask_payload(rest, <<remaining_mask::binary, mask_key::8>>, <<acc::binary, unmasked::8>>)
+  end
+
+  defp unmask_payload(<<byte::8, rest::binary>>, <<mask_key::32>>, acc) do
+    unmasked = Bitwise.bxor(byte, mask_key)
+    <<remaining_mask::24>> = <<mask_key::32>>
+    unmask_payload(rest, <<remaining_mask::24>>, <<acc::binary, unmasked::8>>)
+  end
+
+  defp extract_iso_messages(frames, prefix_bytes, acc, total_bytes) do
+    # Combine all frames into a single buffer and extract ISO messages
+    combined_buffer = Enum.join(frames, <<>>)
+    extract_from_buffer(combined_buffer, prefix_bytes, acc, total_bytes)
+  end
+
+  defp extract_from_buffer(buffer, prefix_bytes, acc, total_bytes) do
+    if byte_size(buffer) < prefix_bytes do
+      {Enum.reverse(acc), total_bytes}
+    else
+      <<msg_length::big-integer-size(prefix_bytes * 8), rest::binary>> = buffer
+
+      if byte_size(rest) >= msg_length do
+        <<message::binary-size(msg_length), remaining::binary>> = rest
+        extract_from_buffer(remaining, prefix_bytes, [message | acc], total_bytes + prefix_bytes + msg_length)
+      else
+        {Enum.reverse(acc), total_bytes}
+      end
+    end
+  end
+
+  defp encode_websocket_frame(payload) do
+    payload_len = byte_size(payload)
+
+    # Binary frame (opcode 2), no masking
+    length_bytes = cond do
+      payload_len < 126 ->
+        <<payload_len::7>>
+
+      payload_len <= 65_535 ->
+        <<126::7, payload_len::16>>
+
+      true ->
+        <<127::7, payload_len::64>>
+    end
+
+    <<0x82::8, length_bytes::binary, payload::binary>>
+  end
+
+  defp frame_data(data, prefix_bytes) do
+    length = byte_size(data)
+    <<length::big-integer-size(prefix_bytes * 8), data::binary>>
+  end
+
+  defp build_context(state) do
+    Context.new(
+      transport_ref: :client,
+      client_id: "ws_client",
+      peer_address: {state.host, state.port},
+      transport_metadata: %{
+        url: state.url,
+        connection_time: state.connection_time,
+        bytes_sent: state.bytes_sent,
+        bytes_received: state.bytes_received
+      }
+    )
+  end
+end
+
 defmodule Iso8583.WebSocket.Registry do
   @moduledoc """
   Registry for WebSocket transport processes.
