@@ -29,6 +29,208 @@ defmodule Iso8583.Client do
 
       {:ok, response} = Iso8583.Client.send_transaction(:my_backend, request)
 
+  ## Example: Complete Gateway/Proxy Application
+
+  This example shows a complete application that receives messages from terminals
+  in one format and forwards them to a backend in another format:
+
+      # 1. Define your transaction types
+      defmodule MyApp.SaleRequest do
+        defstruct [:pan, :processing_code, :amount, :stan, :terminal_id]
+
+        def __iso_formatter__, do: Iso8583.Formatters.Binary
+        def __iso_field_map__, do: %{
+          2  => :pan,
+          3  => :processing_code,
+          4  => :amount,
+          11 => :stan,
+          41 => :terminal_id
+        }
+        def __iso_mti__, do: "0200"
+
+        def new(attrs) do
+          struct!(__MODULE__, %{
+            pan: attrs.pan,
+            processing_code: Map.get(attrs, :processing_code, "000000"),
+            amount: pad_amount(attrs.amount),
+            stan: pad_stan(attrs.stan),
+            terminal_id: attrs.terminal_id
+          })
+        end
+
+        defp pad_amount(amount) when is_integer(amount) do
+          amount |> to_string() |> String.pad_leading(12, "0")
+        end
+        defp pad_stan(stan) when is_integer(stan) do
+          stan |> to_string() |> String.pad_leading(6, "0")
+        end
+      end
+
+      defmodule MyApp.SaleResponse do
+        defstruct [:response_code, :auth_code, :amount, :stan]
+
+        def __iso_formatter__, do: Iso8583.Formatters.Binary
+        def __iso_field_map__, do: %{
+          39 => :response_code,
+          38 => :auth_code,
+          4  => :amount,
+          11 => :stan
+        }
+
+        def approved?(%__MODULE__{response_code: "00"}), do: true
+        def approved?(%__MODULE__{}), do: false
+      end
+
+      # 2. Configure your application with multiple backends
+      defmodule MyApp.Application do
+        use Application
+
+        def start(_type, _args) do
+          children = [
+            # Backend client - Binary format
+            {Iso8583.Client, name: :upstream_switch,
+             transport: Iso8583.Transport.TCP.Client,
+             transport_opts: [
+               host: "switch.bank.example.com",
+               port: 9000,
+               framing: {:length_prefix, 2},
+               reconnect_interval: 5000
+             ],
+             formatter: Iso8583.Formatters.Binary,
+             request_timeout: 30000},
+
+            # Legacy backend - ASCII Hex format!
+            {Iso8583.Client, name: :legacy_backend,
+             transport: Iso8583.Transport.TCP.Client,
+             transport_opts: [
+               host: "legacy.bank.example.com",
+               port: 8100,
+               framing: {:length_prefix, 2}
+             ],
+             formatter: Iso8583.Formatters.AsciiHex,
+             request_timeout: 30000},
+
+            # TCP Server - receives from terminals
+            {Iso8583.Transport.TCP.Server,
+             port: 8080,
+             framing: {:length_prefix, 2},
+             receive_callback: {MyApp.Gateway, :handle_terminal_request}}
+          ]
+
+          opts = [strategy: :one_for_one, name: MyApp.Supervisor]
+          Supervisor.start_link(children, opts)
+        end
+      end
+
+      # 3. Build your gateway
+      defmodule MyApp.Gateway do
+        use GenServer
+        require Logger
+
+        def handle_terminal_request(raw_binary, context) do
+          # Decode using Binary formatter
+          {:ok, iso_msg} = Iso8583.Formatters.Binary.decode(raw_binary)
+
+          # Convert to struct
+          request = ISOMsg.to_struct(iso_msg, MyApp.SaleRequest, %{
+            2 => :pan, 3 => :processing_code, 4 => :amount,
+            11 => :stan, 41 => :terminal_id
+          })
+
+          # Route based on card BIN
+          backend = route_by_bin(request.pan)
+
+          # Send - automatically encodes to correct format!
+          case Iso8583.Client.send_transaction(backend, request) do
+            {:ok, %MyApp.SaleResponse{} = response} ->
+              Logger.info("Response: " <> response.response_code)
+              # Send response back to terminal...
+              handle_response(response, context)
+
+            {:error, reason} ->
+              Logger.error("Error: " <> inspect(reason))
+          end
+
+          :ok
+        end
+
+        defp route_by_bin(<<card_bin::6-bytes, _::binary>>) do
+          case card_bin do
+            "0011xx" -> :legacy_backend   # Legacy cards use ASCII Hex
+            _ -> :upstream_switch        # Others use Binary
+          end
+        end
+      end
+
+      # 4. Use in IEx for testing
+      # iex> request = MyApp.SaleRequest.new(%{
+      # ...>   pan: "4848481234567890",
+      # ...>   amount: 100_00,
+      # ...>   stan: 123456,
+      # ...>   terminal_id: "TERM001"
+      # ...> })
+      # iex> {:ok, response} = Iso8583.Client.send_transaction(:upstream_switch, request)
+      # iex> MyApp.SaleResponse.approved?(response)
+      # true
+
+  ## Example: Request/Response with Different Formats
+
+  This example shows handling messages between systems using different wire formats:
+
+      # Terminal sends Binary, Backend expects ASCII Hex
+      defmodule MyApp.FormatTransformer do
+        def transform_for_backend(raw_binary) do
+          # Decode from Binary (terminal format)
+          {:ok, iso_msg} = Iso8583.Formatters.Binary.decode(raw_binary)
+
+          # Convert to struct
+          request = ISOMsg.to_struct(iso_msg, MyApp.SaleRequest,
+                                    MyApp.SaleRequest.__iso_field_map__())
+
+          # Send to backend - automatically encodes to ASCII Hex!
+          Iso8583.Client.send_transaction(:legacy_backend, request)
+        end
+
+        def transform_for_terminal(response) do
+          # Response struct comes back
+          iso_msg = ISOMsg.from_struct(response, "0210",
+                                      MyApp.SaleResponse.__iso_field_map__())
+
+          # Encode to Binary for terminal
+          Iso8583.Formatters.Binary.encode(iso_msg)
+        end
+      end
+
+  ## Example: Multiple Transaction Types
+
+  Define and handle different transaction types:
+
+      defmodule MyApp.AuthRequest do
+        defstruct [:pan, :amount, :stan, :terminal_id]
+        def __iso_formatter__, do: Iso8583.Formatters.Binary
+        def __iso_field_map__, do: %{2 => :pan, 4 => :amount, 11 => :stan, 41 => :terminal_id}
+        def __iso_mti__, do: "0100"
+      end
+
+      defmodule MyApp.SaleRequest do
+        defstruct [:pan, :amount, :stan, :terminal_id]
+        def __iso_formatter__, do: Iso8583.Formatters.Binary
+        def __iso_field_map__, do: %{2 => :pan, 4 => :amount, 11 => :stan, 41 => :terminal_id}
+        def __iso_mti__, do: "0200"
+      end
+
+      defmodule MyApp.ReversalRequest do
+        defstruct [:pan, :amount, :stan, :original_stan]
+        def __iso_formatter__, do: Iso8583.Formatters.Binary
+        def __iso_field_map__, do: %{2 => :pan, 4 => :amount, 11 => :stan, 90 => :original_stan}
+        def __iso_mti__, do: "0400"
+      end
+
+      # Send different transaction types
+      {:ok, auth_response} = Iso8583.Client.send_transaction(:backend, %AuthRequest{...})
+      {:ok, sale_response} = Iso8583.Client.send_transaction(:backend, %SaleRequest{...})
+      {:ok, reversal_response} = Iso8583.Client.send_transaction(:backend, %ReversalRequest{...})
+
   ## Configuration
 
   Clients must be registered in your supervision tree:
@@ -50,6 +252,7 @@ defmodule Iso8583.Client do
   ## Request/Response Correlation
 
   The client automatically correlates responses with requests using STAN (field 11).
+  Each request must have a unique STAN for proper correlation.
 
   """
 

@@ -11,25 +11,63 @@ defmodule Iso8583.Formatters.Binary do
 
       <<MTI::4-bytes, Bitmap::8-or-16-bytes, FieldData::variable>>
 
-  ## Example
+  ## Examples
 
-      # Encode
+  ### Basic encoding/decoding
+
+      # Create ISOMsg
       iso_msg = ISOMsg.new("0200", %{2 => "1234567890123456789", 4 => "000000001234"})
-      {:ok, binary} = Iso8583.Formatters.Binary.encode(iso_msg)
 
-      # Decode
-      {:ok, iso_msg} = Iso8583.Formatters.Binary.decode(binary)
+      # Encode to binary
+      binary = Iso8583.Formatters.Binary.encode(iso_msg)
+
+      # Decode back
+      {:ok, iso_msg2} = Iso8583.Formatters.Binary.decode(binary)
+
+  ### Using with transaction structs
+
+      defmodule MyApp.SaleRequest do
+        defstruct [:pan, :amount, :stan]
+
+        def __iso_formatter__, do: Iso8583.Formatters.Binary
+        def __iso_field_map__, do: %{2 => :pan, 4 => :amount, 11 => :stan}
+        def __iso_mti__, do: "0200"
+      end
+
+      # Create request
+      request = %MyApp.SaleRequest{
+        pan: "1234567890123456789",
+        amount: "000000001000",
+        stan: "000001"
+      }
+
+      # Convert to ISOMsg and encode
+      iso_msg = ISOMsg.from_struct(
+        request,
+        "0200",
+        MyApp.SaleRequest.__iso_field_map__()
+      )
+      binary = Iso8583.Formatters.Binary.encode(iso_msg)
+
+      # Decode response
+      {:ok, response_iso} = Iso8583.Formatters.Binary.decode(response_binary)
+
+  ### Building messages with pipe operator
+
+      iso_msg = ISOMsg.new("0200")
+      |> ISOMsg.set_field(2, "1234567890123456789")
+      |> ISOMsg.set_field(3, "000000")
+      |> ISOMsg.set_field(4, "000000001234")
+      |> ISOMsg.set_field(11, "000001")
+      |> ISOMsg.set_field(41, "12345678")
+
+      binary = Iso8583.Formatters.Binary.encode(iso_msg)
+
   """
-
-  @behaviour Iso8583.Formatter
-
-  alias ISOMsg
-  alias IsoBitmap
 
   @doc """
   Encodes an ISOMsg to standard binary format.
   """
-  @impl true
   def encode(%ISOMsg{} = iso_msg) do
     mti = ISOMsg.get_mti(iso_msg)
     data = ISOMsg.get_data(iso_msg)
@@ -43,7 +81,6 @@ defmodule Iso8583.Formatters.Binary do
   @doc """
   Decodes a binary format message to ISOMsg.
   """
-  @impl true
   def decode(raw) when is_binary(raw) and byte_size(raw) >= 12 do
     # Extract MTI (4 bytes)
     <<mti::bytes-size(4), rest::binary>> = raw

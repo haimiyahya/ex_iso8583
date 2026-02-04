@@ -54,6 +54,86 @@ defmodule ISOMsg do
         data: %{2 => "1234567890123456789"}
       }
 
+  ### Using the helper functions
+
+      # Create and build using pipe operator
+      iso_msg = ISOMsg.new("0200")
+      |> ISOMsg.set_field(2, "1234567890123456789")
+      |> ISOMsg.set_field(3, "000000")
+      |> ISOMsg.set_field(4, "000000001234")
+      |> ISOMsg.set_field(11, "000001")
+      |> ISOMsg.set_field(41, "12345678")
+
+      # Get fields
+      pan = ISOMsg.get_field(iso_msg, 2)  # => "1234567890123456789"
+      mti = ISOMsg.get_mti(iso_msg)       # => "0200"
+
+      # Check for fields
+      ISOMsg.has_field?(iso_msg, 2)  # => true
+      ISOMsg.has_field?(iso_msg, 99) # => false
+
+      # List all fields
+      ISOMsg.fields(iso_msg)  # => [2, 3, 4, 11, 41]
+
+  ### Converting between Structs and ISOMsg
+
+      # Define your transaction struct
+      defmodule MyApp.SaleRequest do
+        defstruct [:pan, :amount, :stan, :terminal_id]
+
+        def __iso_field_map__, do: %{
+          2 => :pan,
+          4 => :amount,
+          11 => :stan,
+          41 => :terminal_id
+        }
+        def __iso_mti__, do: "0200"
+      end
+
+      # Create request struct
+      request = %MyApp.SaleRequest{
+        pan: "1234567890123456789",
+        amount: "000000001000",
+        stan: "000001",
+        terminal_id: "TERM001"
+      }
+
+      # Convert struct to ISOMsg
+      field_map = MyApp.SaleRequest.__iso_field_map__()
+      iso_msg = ISOMsg.from_struct(request, "0200", field_map)
+
+      # Or use the struct's own function
+      iso_msg = ISOMsg.from_struct(
+        request,
+        MyApp.SaleRequest.__iso_mti__,
+        MyApp.SaleRequest.__iso_field_map__()
+      )
+
+      # Convert ISOMsg back to struct
+      request2 = ISOMsg.to_struct(iso_msg, MyApp.SaleRequest, field_map)
+
+  ### Working with formatters
+
+      # Encode to wire format
+      binary = Iso8583.Formatters.Binary.encode(iso_msg)
+
+      # Decode from wire format
+      {:ok, iso_msg2} = Iso8583.Formatters.Binary.decode(binary)
+
+  ### Field-by-field operations
+
+      # Get with default
+      value = ISOMsg.get_field(iso_msg, 99, "default")  # => "default"
+
+      # Update MTI
+      iso_msg = ISOMsg.set_mti(iso_msg, "0210")
+
+      # Delete a field
+      iso_msg = ISOMsg.delete_field(iso_msg, 60)
+
+      # Get all data as a map
+      data = ISOMsg.get_data(iso_msg)
+
   """
 
   defstruct config: %{ascii_format: false, ascii_bitmap: true, tpdu_length: 5},

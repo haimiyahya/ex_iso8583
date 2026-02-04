@@ -11,33 +11,63 @@ defmodule Iso8583.Formatters.AsciiHex do
 
       <<MTI::4-ascii-chars, HexBitmap::16-or-32-hex-chars, FieldData::variable>>
 
-  ## Example
-
-      # Encode
-      iso_msg = ISOMsg.new("0200", %{2 => "1234567890123456789", 4 => "000000001234"})
-      {:ok, binary} = Iso8583.Formatters.AsciiHex.encode(iso_msg)
-
-      # Decode
-      {:ok, iso_msg} = Iso8583.Formatters.AsciiHex.decode(binary)
-
   ## Difference from Binary Format
 
   The key difference is the bitmap encoding:
   - Binary: `<<0x60, 0x00, ...>>` (raw bytes)
   - ASCII Hex: `"6000..."` (ASCII hex string)
 
-  This format is commonly used by systems that prefer ASCII-based protocols.
+  This format is commonly used by legacy systems that prefer ASCII-based protocols.
+
+  ## Examples
+
+  ### Basic encoding/decoding
+
+      # Create ISOMsg
+      iso_msg = ISOMsg.new("0200", %{2 => "1234567890123456789", 4 => "000000001234"})
+
+      # Encode to ASCII hex format
+      binary = Iso8583.Formatters.AsciiHex.encode(iso_msg)
+      # Results in: "0200" <> "60000000..." (ASCII hex bitmap) <> field data
+
+      # Decode back
+      {:ok, iso_msg2} = Iso8583.Formatters.AsciiHex.decode(binary)
+
+  ### Converting between Binary and ASCII Hex formats
+
+      # Decode from Binary, encode to ASCII Hex
+      {:ok, iso_msg} = Iso8583.Formatters.Binary.decode(binary_data)
+
+      # Convert to ASCII Hex for legacy backend
+      ascii_hex_binary = Iso8583.Formatters.AsciiHex.encode(iso_msg)
+
+      # Send to legacy system...
+
+  ### Using with different backends
+
+      # Define struct for ASCII Hex backend
+      defmodule MyApp.LegacySaleRequest do
+        defstruct [:pan, :amount, :stan]
+
+        def __iso_formatter__, do: Iso8583.Formatters.AsciiHex
+        def __iso_field_map__, do: %{2 => :pan, 4 => :amount, 11 => :stan}
+        def __iso_mti__, do: "0200"
+      end
+
+      # Configure client for legacy backend
+      {Iso8583.Client, name: :legacy_backend,
+       transport: Iso8583.Transport.TCP.Client,
+       transport_opts: [host: "legacy.example.com", port: 8100],
+       formatter: Iso8583.Formatters.AsciiHex}  # Different format!
+
+      # Send - automatically encodes to ASCII Hex
+      Iso8583.Client.send_transaction(:legacy_backend, %LegacySaleRequest{...})
+
   """
-
-  @behaviour Iso8583.Formatter
-
-  alias ISOMsg
-  alias IsoBitmap
 
   @doc """
   Encodes an ISOMsg to ASCII hex format.
   """
-  @impl true
   def encode(%ISOMsg{} = iso_msg) do
     mti = ISOMsg.get_mti(iso_msg)
     data = ISOMsg.get_data(iso_msg)
@@ -54,7 +84,6 @@ defmodule Iso8583.Formatters.AsciiHex do
   @doc """
   Decodes an ASCII hex format message to ISOMsg.
   """
-  @impl true
   def decode(raw) when is_binary(raw) and byte_size(raw) >= 20 do
     # Extract MTI (4 ASCII characters = 4 bytes)
     <<mti::bytes-size(4), rest::binary>> = raw
