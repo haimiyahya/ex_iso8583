@@ -108,8 +108,7 @@ defmodule TransactionProcessor.TimeoutWrapper do
 
   """
 
-  alias Ex_Iso8583.IsoBitmap
-  alias Ex_Iso8583.IsoField
+  # Removed unused aliases - they're not needed for this module
 
   @type t :: %__MODULE__{
           processor_module: module(),
@@ -546,26 +545,9 @@ defmodule TransactionProcessor.TimeoutWrapper do
 
   defp extract_mti(<<mti::bytes-size(4), _rest::binary>>) when is_binary(mti), do: {:ok, mti}
   defp extract_mti(<<_rest::binary>>), do: {:error, :no_mti}
-
-  # For BCD-encoded MTI (common in ISO 8583)
-  defp extract_mti(raw_message) when byte_size(raw_message) >= 2 do
-    try do
-      # Try to decode BCD MTI
-      <<mti_bcd::bytes-size(2), _rest::binary>> = raw_message
-      mti = Ex_Iso8583.Util.bcd_to_str(mti_bcd)
-      if String.length(mti) == 4 do
-        {:ok, mti}
-      else
-        {:error, :invalid_mti}
-      end
-    rescue
-      _ -> {:error, :no_mti}
-    end
-  end
-
   defp extract_mti(_), do: {:error, :no_mti}
 
-  defp extract_processing_code(raw_message) do
+  defp extract_processing_code(_raw_message) do
     # Processing code is typically field 3 (6 digits, fixed or variable)
     # For simplicity, we'll assume it's at a known position after MTI and bitmap
     # In a real implementation, you'd parse the full ISO message

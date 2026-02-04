@@ -207,18 +207,28 @@ defmodule TransactionProcessor.Middleware do
 
     @behaviour TransactionProcessor.Middleware
 
+    defstruct [:validate_fn]
+
+    def new(opts \\ []) do
+      validate_fn = Keyword.get(opts, :validate_fn, fn _ -> :ok end)
+      %__MODULE__{validate_fn: validate_fn}
+    end
+
     def call(request, next) do
-      case validate(request) do
+      config = get_config(request)
+      validate_fn = config.validate_fn
+
+      case validate_fn.(request) do
         :ok ->
           next.(request)
 
-        {:error, _reason} ->
-          {:error, {:validation_failed, "validation failed"}}
+        {:error, _reason} = error ->
+          error
       end
     end
 
-    defp validate(%{__validate_fn__: _}), do: :ok
-    defp validate(_), do: :ok
+    defp get_config(%{__middleware_config__: %{} = config}), do: config
+    defp get_config(_), do: %__MODULE__{} |> new()
   end
 
   defmodule Transformer do
@@ -240,13 +250,22 @@ defmodule TransactionProcessor.Middleware do
 
     @behaviour TransactionProcessor.Middleware
 
+    defstruct [:transform_fn]
+
+    def new(opts \\ []) do
+      transform_fn = Keyword.get(opts, :transform_fn, fn req -> req end)
+      %__MODULE__{transform_fn: transform_fn}
+    end
+
     def call(request, next) do
-      transformed = transform(request)
+      config = get_config(request)
+      transform_fn = config.transform_fn
+      transformed = transform_fn.(request)
       next.(transformed)
     end
 
-    defp transform(%{__transform_fn__: _}), do: :ok
-    defp transform(request), do: request
+    defp get_config(%{__middleware_config__: %{} = config}), do: config
+    defp get_config(_), do: %__MODULE__{} |> new()
   end
 end
 
