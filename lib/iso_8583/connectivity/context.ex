@@ -59,7 +59,7 @@ defmodule Iso8583.Context do
 
   """
 
-  use Bitwise
+  import Bitwise
 
   defstruct [
     :transport_ref,

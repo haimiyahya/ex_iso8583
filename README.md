@@ -27,7 +27,7 @@ Ex_Iso8583
          +-- Transport        - Behaviour for transport implementations
          +-- Handler          - Generic handler connecting processor + transport
          +-- Transport.TCP    - TCP Server and Client implementations
-         +-- Transport.HTTP   - HTTP Server and Client implementations (planned)
+         +-- Transport.HTTP   - HTTP Server implementation (JSON/REST API)
          +-- Transport.UDP    - UDP Server and Client implementations (planned)
 ```
 
@@ -503,14 +503,14 @@ end
 
 ### Available Transports
 
-| Transport | Type | Description |
-|-----------|------|-------------|
-| `Iso8583.Transport.TCP.Server` | Server | Accept TCP connections from clients |
-| `Iso8583.Transport.TCP.Client` | Client | Connect to TCP server |
-| `Iso8583.Transport.UDP.Server` | Server | Receive UDP datagrams |
-| `Iso8583.Transport.UDP.Client` | Client | Send UDP datagrams |
-| `Iso8583.Transport.HTTP.Server` | Server | HTTP server (Plug/Bandit) |
-| `Iso8583.Transport.HTTP.Client` | Client | HTTP client (Finch/Req) |
+| Transport | Type | Status | Description |
+|-----------|------|--------|-------------|
+| `Iso8583.Transport.TCP.Server` | Server | ✅ Implemented | Accept TCP connections from clients |
+| `Iso8583.Transport.TCP.Client` | Client | ✅ Implemented | Connect to TCP server |
+| `Iso8583.Transport.HTTP.Server` | Server | ✅ Implemented | HTTP/HTTPS server with JSON API |
+| `Iso8583.Transport.HTTP.Client` | Client | Planned | HTTP client for upstream calls |
+| `Iso8583.Transport.UDP.Server` | Server | Planned | Receive UDP datagrams |
+| `Iso8583.Transport.UDP.Client` | Client | Planned | Send UDP datagrams |
 
 ### TCP Server Transport
 
@@ -552,6 +552,68 @@ defmodule MyApp.UpstreamHandler do
     ]
 end
 ```
+
+### HTTP Server Transport
+
+Provides a REST API for sending ISO 8583 messages over HTTP.
+
+**Request Format:**
+```bash
+POST /iso8583
+Content-Type: application/json
+
+{
+  "iso_message": "base64_encoded_iso8583_binary",
+  "request_id": "optional-correlation-id"
+}
+```
+
+**Response Format (Success):**
+```json
+{
+  "iso_message": "base64_encoded_response",
+  "request_id": "same-as-request"
+}
+```
+
+**Response Format (Error):**
+```json
+{
+  "error": "error_message",
+  "request_id": "same-as-request"
+}
+```
+
+```elixir
+defmodule MyApp.ApiHandler do
+  use Iso8583.Handler,
+    processor: MyApp.PaymentProcessor,
+    transport: Iso8583.Transport.HTTP.Server,
+    transport_opts: [
+      port: 4000,           # HTTP port
+      path: "/iso8583",     # API endpoint path
+      scheme: :http,        # :http or :https
+      timeout: 30000,       # Request timeout (ms)
+      cors_origins: ["https://example.com"]  # Optional CORS
+    ]
+end
+```
+
+**HTTPS Support:**
+```elixir
+transport_opts: [
+  port: 8443,
+  scheme: :https,
+  certfile: "/path/to/cert.pem",
+  keyfile: "/path/to/key.pem"
+]
+```
+
+**HTTP Context Metadata:**
+- `transport_ref` - The `Plug.Conn` struct
+- `client_id` - `"http_client"`
+- `peer_address` - Client's IP from `conn.remote_ip`
+- `transport_metadata` - `%{method, path, headers, user_agent, content_type}`
 
 ### Iso8583.Context
 
