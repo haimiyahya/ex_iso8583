@@ -458,6 +458,350 @@ defmodule Iso8583.Transport.HTTP.Server.Plug do
   end
 end
 
+defmodule Iso8583.Transport.HTTP.Client do
+  @moduledoc """
+  HTTP Client transport for ISO 8583 messages.
+
+  Sends ISO 8583 messages over HTTP with 2-byte length-prefix framing.
+
+  ## Usage
+
+      defmodule MyApp.HTTPClientHandler do
+        use Iso8583.Handler,
+          processor: MyApp.PaymentProcessor,
+          transport: Iso8583.Transport.HTTP.Client,
+          transport_opts: [
+            url: "http://localhost:4000/iso8583"
+          ]
+      end
+
+  ## Options
+
+  | Option | Type | Default | Description |
+  |--------|------|---------|-------------|
+  | `:url` | `String.t()` | Required | HTTP endpoint URL |
+  | `:name` | `atom()` | `nil` | Name for registration |
+  | `:timeout` | `integer()` | `30000` | Request timeout (ms) |
+  | `:prefix_bytes` | `1 \\| 2 \\| 4` | `2` | Length prefix bytes for framing |
+  | `:headers` | `map()` | `%{}` | Additional HTTP headers |
+
+  ## Message Framing
+
+  Uses length-prefix framing (default: 2 bytes) wrapped in JSON.
+
+  **Request:**
+  ```json
+  {
+    "iso_message": "base64_encoded_data_with_length_prefix"
+  }
+  ```
+
+  The `iso_message` field contains base64-encoded data where:
+  - First 2 bytes: message length (big-endian)
+  - Remaining bytes: ISO 8583 message
+
+  **Response:**
+  ```json
+  {
+    "iso_message": "base64_encoded_response_with_length_prefix"
+  }
+  ```
+
+  ## Message Flow
+
+  ```
+  Client -> HTTP Server:
+    POST /iso8583
+    {
+      "iso_message": "Base64([Len Hi][Len Lo][ISO Message...])"
+    }
+
+  HTTP Server -> Client:
+    {
+      "iso_message": "Base64([Len Hi][Len Lo][ISO Response...])"
+    }
+  ```
+
+  ## Context Metadata
+
+  The client populates `Iso8583.Context` with:
+  - `transport_ref` - `:client` (atom identifier)
+  - `client_id` - `"http_client"`
+  - `peer_address` - Server's host
+  - `transport_metadata` - `%{url, request_id, bytes_sent, bytes_received}`
+
+  ## Example
+
+      # Connect to HTTP server
+      {:ok, client} = Iso8583.Transport.HTTP.Client.start_link(
+        url: "http://localhost:4000/iso8583"
+      )
+
+      # Set callback for incoming messages
+      Iso8583.Transport.HTTP.Client.set_receive_callback(client, fn
+        data, context ->
+          # Process ISO 8583 response
+          IO.inspect("Received: \#{Base.encode16(data)}")
+      end)
+
+      # Send ISO message (automatically framed with length prefix)
+      iso_message = <<0x02, 0x00, 0xB2, 0x20, ...>>
+      Iso8583.Transport.HTTP.Client.send(:client, iso_message)
+  """
+
+  use GenServer
+  require Logger
+  import Kernel, except: [send: 2]
+
+  alias Iso8583.Context
+
+  defstruct [
+    :url,
+    :host,
+    :port,
+    :path,
+    :scheme,
+    :receive_callback,
+    :timeout,
+    :prefix_bytes,
+    :headers,
+    :bytes_sent,
+    :bytes_received
+  ]
+
+  @doc """
+  Starts the HTTP client transport.
+  """
+  def start_link(opts) do
+    GenServer.start_link(__MODULE__, opts)
+  end
+
+  @doc """
+  Returns the child spec for supervision.
+  """
+  def child_spec(opts) do
+    %{
+      id: __MODULE__,
+      start: {__MODULE__, :start_link, [opts]},
+      restart: :permanent,
+      type: :worker
+    }
+  end
+
+  @doc """
+  Sends data to the HTTP server.
+  """
+  def send(:client, data) do
+    GenServer.call(__MODULE__, {:send, data})
+  end
+
+  def send(pid, data) when is_pid(pid) do
+    GenServer.call(pid, {:send, data})
+  end
+
+  @doc """
+  Registers the callback for receiving messages.
+  """
+  def set_receive_callback(client_pid, callback) when is_pid(client_pid) do
+    GenServer.call(client_pid, {:set_callback, callback})
+  end
+
+  @doc """
+  Stops the client.
+  """
+  def stop(client_pid) when is_pid(client_pid) do
+    GenServer.stop(client_pid, :normal)
+  end
+
+  # Server Callbacks
+
+  @impl true
+  def init(opts) do
+    url = Keyword.fetch!(opts, :url)
+    timeout = Keyword.get(opts, :timeout, 30_000)
+    prefix_bytes = Keyword.get(opts, :prefix_bytes, 2)
+    headers = Keyword.get(opts, :headers, %{})
+
+    # Parse URL
+    {scheme, host, port, path} = parse_url(url)
+
+    {:ok,
+     %__MODULE__{
+       url: url,
+       scheme: scheme,
+       host: host,
+       port: port,
+       path: path,
+       timeout: timeout,
+       prefix_bytes: prefix_bytes,
+       headers: headers,
+       bytes_sent: 0,
+       bytes_received: 0
+     }}
+  end
+
+  @impl true
+  def handle_call({:send, data}, _from, state) do
+    # Frame the data with length prefix
+    framed_data = frame_data(data, state.prefix_bytes)
+
+    # Encode to base64
+    encoded_message = Base.encode64(framed_data)
+
+    # Build JSON request
+    request_body = Jason.encode!(%{iso_message: encoded_message})
+
+    # Generate request ID
+    request_id = generate_request_id()
+
+    # Make HTTP request using :httpc
+    response =
+      :httpc.request(
+        :post,
+        {to_charlist(state.url), build_headers(state.headers), "application/json", request_body},
+        [{:timeout, state.timeout}, {:body_format, :binary}],
+        :infinity
+      )
+
+    case response do
+      {:ok, {{_version, 200, _reason_phrase}, _headers, body}} ->
+        # Parse response
+        case parse_response(body) do
+          {:ok, response_data} ->
+            # Extract ISO message from framing
+            case extract_iso_message(response_data, state.prefix_bytes) do
+              {:ok, iso_message} ->
+                # Call callback if set
+                if state.receive_callback do
+                  context = build_context(state, request_id)
+                  state.receive_callback.(iso_message, context)
+                end
+
+                {:reply, :ok, %{state | bytes_sent: state.bytes_sent + byte_size(request_body),
+                  bytes_received: state.bytes_received + byte_size(body)}}
+
+              {:error, reason} ->
+                {:reply, {:error, reason}, state}
+            end
+
+          {:error, reason} ->
+            {:reply, {:error, reason}, state}
+        end
+
+      {:ok, {{_version, status_code, _reason_phrase}, _headers, body}} ->
+        {:reply, {:error, {:http_error, status_code, body}}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  @impl true
+  def handle_call({:set_callback, callback}, _from, state) do
+    {:reply, :ok, %{state | receive_callback: callback}}
+  end
+
+  @impl true
+  def terminate(_reason, _state) do
+    :ok
+  end
+
+  # Private functions
+
+  defp parse_url(url) do
+    uri = URI.parse(url)
+
+    scheme = case uri.scheme do
+      "http" -> :http
+      "https" -> :https
+      _ -> :http
+    end
+
+    port = case {scheme, uri.port} do
+      {:http, nil} -> 80
+      {:https, nil} -> 443
+      {_, port} -> port
+    end
+
+    {scheme, uri.host, port, uri.path || "/"}
+  end
+
+  defp build_headers(custom_headers) do
+    base_headers = [
+      {"Content-Type", "application/json"},
+      {"Accept", "application/json"}
+    ]
+
+    custom =
+      Enum.map(custom_headers, fn {k, v} ->
+        {to_string(k), to_string(v)}
+      end)
+
+    base_headers ++ custom
+  end
+
+  defp parse_response(body) do
+    case Jason.decode(body) do
+      {:ok, %{"iso_message" => encoded_msg}} ->
+        case Base.decode64(encoded_msg) do
+          {:ok, data} ->
+            {:ok, data}
+
+          :error ->
+            {:error, :invalid_base64}
+        end
+
+      {:ok, %{"error" => error_msg}} ->
+        {:error, {:server_error, error_msg}}
+
+      {:ok, _} ->
+        {:error, :missing_iso_message}
+
+      {:error, _} ->
+        {:error, :invalid_json}
+    end
+  end
+
+  defp extract_iso_message(data, prefix_bytes) do
+    if byte_size(data) < prefix_bytes do
+      {:error, :incomplete_message}
+    else
+      <<msg_length::big-integer-size(prefix_bytes * 8), rest::binary>> = data
+
+      if byte_size(rest) >= msg_length do
+        <<message::binary-size(msg_length), _remaining::binary>> = rest
+        {:ok, message}
+      else
+        {:error, :incomplete_message}
+      end
+    end
+  end
+
+  defp frame_data(data, prefix_bytes) do
+    length = byte_size(data)
+    <<length::big-integer-size(prefix_bytes * 8), data::binary>>
+  end
+
+  defp build_context(state, request_id) do
+    Context.new(
+      transport_ref: :client,
+      client_id: "http_client",
+      peer_address: state.host,
+      request_id: request_id,
+      transport_metadata: %{
+        url: state.url,
+        bytes_sent: state.bytes_sent,
+        bytes_received: state.bytes_received
+      }
+    )
+  end
+
+  defp generate_request_id do
+    <<a::32, b::16, c::16, d::16, e::48>> = :crypto.strong_rand_bytes(16)
+    :erlang.list_to_binary(:io_lib.format("~8.16.0b-~4.16.0b-~4.16.0b-~4.16.0b-~12.16.0b", [a, b, c, d, e]))
+  end
+end
+
 defmodule Iso8583.HTTP.Registry do
   @moduledoc """
   Registry for HTTP transport processes.
