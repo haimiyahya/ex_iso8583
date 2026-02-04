@@ -49,15 +49,15 @@ defmodule Iso8583.Transport.TCP.Server do
   | `:port` | `integer()` | Required | Port to listen on |
   | `:acceptors` | `integer()` | `10` | Number of acceptor processes |
   | `:name` | `atom()` | `nil` | Name for registration |
-  | `:packet_handler` | `atom() \| module()` | `:raw` | How to parse messages |
+  | `:packet_handler` | `atom() \| tuple()` | `:raw` | How to parse messages |
   | `:timeout` | `integer()` | `60000` | Connection idle timeout (ms) |
 
-  ## Packet Handlers
+  ## Packet Handlers (Framing)
 
   ### `:raw` (default)
   Reads entire socket buffer. Best for:
   - Clients that send complete messages at once
-  - Messages with known length prefixes
+  - Protocols with external framing
 
   ### `:line`
   Reads until newline. Best for:
@@ -67,6 +67,65 @@ defmodule Iso8583.Transport.TCP.Server do
   ### `{:size, bytes}`
   Reads fixed-size messages. Best for:
   - Fixed-length ISO messages
+  - Protocols with predictable message sizes
+
+  ### `{:length_prefix, bytes}` - **Recommended for ISO 8583**
+  Reads length-prefixed messages. Each message is prefixed with a big-endian
+  (network order) length field. Best for:
+  - Standard ISO 8583 over TCP
+  - Protocols with variable-length messages
+  - Production deployments requiring message boundaries
+
+  Example: `packet_handler: {:length_prefix, 2}` means each message is prefixed
+  with a 2-byte length field (max message size: 65535 bytes).
+
+  **Message format:**
+  ```
+  +--------+--------+--------------------------+
+  | Len Hi | Len Lo |     Message Data         |
+  +--------+--------+--------------------------+
+  |<---- 2 bytes --->|<-- Length bytes ------->|
+  ```
+
+  **Python client example:**
+  ```python
+  import socket
+  import struct
+
+  # Connect to server
+  sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+  sock.connect(('localhost', 8080))
+
+  # Send ISO message with 2-byte length prefix
+  iso_message = bytes.fromhex('0200b2200000001000000000000000000000000011234567890123456')
+  framed = struct.pack('>H', len(iso_message)) + iso_message  # Big-endian 2-byte length
+  sock.send(framed)
+
+  # Receive response with 2-byte length prefix
+  length_bytes = sock.recv(2)
+  length = struct.unpack('>H', length_bytes)[0]
+  response = sock.recv(length)
+  ```
+
+  **Elixir client example:**
+  ```elixir
+  # Connect to server
+  {:ok, socket} = :gen_tcp.connect('localhost', 8080, [:binary, packet: 0, active: false])
+
+  # Send ISO message with 2-byte length prefix
+  iso_message = <<0x02, 0x00, 0xB2, 0x20, ...>>
+  length = byte_size(iso_message)
+  :gen_tcp.send(socket, <<length::big-integer-size(16), iso_message::binary>>)
+
+  # Receive response with 2-byte length prefix
+  {:ok, <<length::big-integer-size(16)>>} = :gen_tcp.recv(socket, 2)
+  {:ok, response} = :gen_tcp.recv(socket, length)
+  ```
+
+  **Supported prefix sizes:**
+  - `{:length_prefix, 1}` - 1 byte length (max: 255 bytes)
+  - `{:length_prefix, 2}` - 2 bytes length (max: 65,535 bytes) - **Most common**
+  - `{:length_prefix, 4}` - 4 bytes length (max: 4,294,967,295 bytes)
 
   ### Custom module
   Implement `handle_packet/2`:
@@ -508,6 +567,9 @@ defmodule Iso8583.Transport.TCP.Connection do
           {:error, reason} -> {:error, reason}
         end
 
+      {:length_prefix, prefix_bytes} when prefix_bytes in [1, 2, 4] ->
+        recv_length_prefixed(state, prefix_bytes)
+
       {module, function} when is_atom(module) and is_atom(function) ->
         apply(module, function, [state.socket, state.timeout])
 
@@ -517,6 +579,48 @@ defmodule Iso8583.Transport.TCP.Connection do
         else
           {:error, :invalid_packet_handler}
         end
+    end
+  end
+
+  # Length-prefixed framing with buffering
+  defp recv_length_prefixed(state, prefix_bytes) do
+    # First, try to get more data if buffer is empty
+    case get_buffer_data(state) do
+      {:error, reason} ->
+        {:error, reason}
+
+      {:ok, buffer} ->
+        # Check if we have enough data for the length prefix
+        prefix_size = prefix_bytes
+
+        if byte_size(buffer) < prefix_size do
+          # Not enough data for length prefix, wait for more
+          {:ok, <<>>, buffer}
+        else
+          # Extract the message length (big-endian/network order)
+          <<msg_length::big-integer-size(prefix_bytes * 8), rest::binary>> = buffer
+
+          # Check if we have the complete message
+          if byte_size(rest) >= msg_length do
+            # Extract the message and any remaining data
+            <<message::binary-size(msg_length), remaining::binary>> = rest
+            {:ok, message, remaining}
+          else
+            # Incomplete message, wait for more data
+            {:ok, <<>>, buffer}
+          end
+        end
+    end
+  end
+
+  defp get_buffer_data(state) do
+    if byte_size(state.buffer) == 0 do
+      case :gen_tcp.recv(state.socket, 0, state.timeout) do
+        {:ok, data} -> {:ok, data}
+        {:error, reason} -> {:error, reason}
+      end
+    else
+      {:ok, state.buffer}
     end
   end
 end

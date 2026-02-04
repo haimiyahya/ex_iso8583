@@ -417,3 +417,134 @@ defmodule Iso8583.Transport.HTTP.ServerTest do
   end
 end
 
+defmodule Iso8583.Transport.WebSocketTest do
+  use ExUnit.Case
+
+  alias Iso8583.Transport.WebSocket
+
+  describe "encode_framed/2" do
+    test "encodes message with 2-byte length prefix" do
+      message = <<1, 2, 3>>
+      encoded = WebSocket.encode_framed(message, 2)
+
+      assert encoded == <<0, 3, 1, 2, 3>>
+    end
+
+    test "encodes message with 1-byte length prefix" do
+      message = <<1, 2, 3>>
+      encoded = WebSocket.encode_framed(message, 1)
+
+      assert encoded == <<3, 1, 2, 3>>
+    end
+
+    test "encodes message with 4-byte length prefix" do
+      message = <<1, 2, 3>>
+      encoded = WebSocket.encode_framed(message, 4)
+
+      assert encoded == <<0, 0, 0, 3, 1, 2, 3>>
+    end
+
+    test "encodes empty message" do
+      encoded = WebSocket.encode_framed(<<>>, 2)
+
+      assert encoded == <<0, 0>>
+    end
+
+    test "encodes 255 byte message with 1-byte prefix" do
+      message = :binary.copy(<<42>>, 255)
+      encoded = WebSocket.encode_framed(message, 1)
+
+      assert byte_size(encoded) == 256
+      assert binary_part(encoded, 0, 1) == <<255>>
+    end
+
+    test "encodes large message with 2-byte prefix" do
+      message = :binary.copy(<<42>>, 1000)
+      encoded = WebSocket.encode_framed(message, 2)
+
+      assert byte_size(encoded) == 1002
+      assert binary_part(encoded, 0, 2) == <<3, 232>>  # 1000 in big-endian
+    end
+  end
+
+  describe "decode_framed/2" do
+    test "decodes complete message with 2-byte prefix" do
+      buffer = <<0, 3, 1, 2, 3>>
+      assert WebSocket.decode_framed(buffer, 2) == {:ok, <<1, 2, 3>>, <<>>}
+    end
+
+    test "decodes complete message with 1-byte prefix" do
+      buffer = <<3, 1, 2, 3>>
+      assert WebSocket.decode_framed(buffer, 1) == {:ok, <<1, 2, 3>>, <<>>}
+    end
+
+    test "decodes complete message with 4-byte prefix" do
+      buffer = <<0, 0, 0, 3, 1, 2, 3>>
+      assert WebSocket.decode_framed(buffer, 4) == {:ok, <<1, 2, 3>>, <<>>}
+    end
+
+    test "returns incomplete when buffer has only length prefix" do
+      buffer = <<0, 10>>
+      assert WebSocket.decode_framed(buffer, 2) == :incomplete
+    end
+
+    test "returns incomplete when buffer has partial message" do
+      buffer = <<0, 10, 1, 2, 3>>
+      assert WebSocket.decode_framed(buffer, 2) == :incomplete
+    end
+
+    test "returns incomplete when buffer is empty" do
+      buffer = <<>>
+      assert WebSocket.decode_framed(buffer, 2) == :incomplete
+    end
+
+    test "decodes message and returns remaining buffer" do
+      buffer = <<0, 3, 1, 2, 3, 0, 5, 4, 5, 6, 7>>
+      assert WebSocket.decode_framed(buffer, 2) == {:ok, <<1, 2, 3>>, <<0, 5, 4, 5, 6, 7>>}
+    end
+
+    test "decodes empty message" do
+      buffer = <<0, 0, 1, 2, 3>>
+      assert WebSocket.decode_framed(buffer, 2) == {:ok, <<>>, <<1, 2, 3>>}
+    end
+
+    test "handles max 2-byte length (65535)" do
+      data = :binary.copy(<<42>>, 65535)
+      buffer = <<255, 255, data::binary>>
+      assert WebSocket.decode_framed(buffer, 2) == {:ok, data, <<>>}
+    end
+  end
+
+  describe "encode/decode roundtrip" do
+    test "roundtrip with 2-byte prefix" do
+      original = <<0x02, 0x00, 0xB2, 0x20, 0x00, 0x00, 0x00, 0x10>>
+      encoded = WebSocket.encode_framed(original, 2)
+      assert {:ok, decoded, <<>>} = WebSocket.decode_framed(encoded, 2)
+      assert decoded == original
+    end
+
+    test "roundtrip with 1-byte prefix" do
+      original = <<1, 2, 3, 4, 5>>
+      encoded = WebSocket.encode_framed(original, 1)
+      assert {:ok, decoded, <<>>} = WebSocket.decode_framed(encoded, 1)
+      assert decoded == original
+    end
+
+    test "roundtrip with 4-byte prefix" do
+      original = :binary.copy(<<42>>, 1000)
+      encoded = WebSocket.encode_framed(original, 4)
+      assert {:ok, decoded, <<>>} = WebSocket.decode_framed(encoded, 4)
+      assert decoded == original
+    end
+  end
+
+  describe "WebSocket server configuration" do
+    test "has child spec" do
+      spec = Iso8583.Transport.WebSocket.Server.child_spec(port: 4000)
+
+      assert spec.id == Iso8583.Transport.WebSocket.Server
+      assert spec.restart == :permanent
+      assert spec.type == :supervisor
+    end
+  end
+end
