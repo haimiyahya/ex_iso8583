@@ -83,9 +83,9 @@ defmodule Ex_Iso8583.TransactionType do
         fields %{
           pan: 2,
           amount: 4,
-          stan: 11,           # Always mandatory
-          terminal_id: 41,    # Always mandatory
-          merchant_id: 42     # Always mandatory
+          stan: 11,        # Always mandatory
+          terminal_id: 41, # Always mandatory
+          merchant_id: 42  # Always mandatory
         }
         mandatory [:pan, :amount, :stan, :terminal_id, :merchant_id]
       end
@@ -152,7 +152,7 @@ defmodule Ex_Iso8583.TransactionType do
     {mti, proc_code_pattern, fields, mandatory, optional} = build_config(config)
 
     # Compile-time validation
-    validate_compile_time!(env.module, fields, mandatory, optional)
+    validate_compile_time!(env.module, mti, fields, mandatory, optional)
 
     quote do
       @mti unquote(macro_escape(mti))
@@ -302,14 +302,23 @@ defmodule Ex_Iso8583.TransactionType do
   defp macro_escape(term), do: Macro.escape(term)
 
   # Always mandatory ISO 8583 fields (critical for transaction processing)
-  @always_mandatory [11, 41, 42]  # STAN, Terminal ID, Merchant ID
+  # Field numbers: 11 = STAN, 41 = Terminal ID, 42 = Merchant ID
+  @always_mandatory_field_numbers [11, 41, 42]
 
   # Compile-time validation for transaction type definitions
-  defp validate_compile_time!(module, fields, mandatory, optional) do
+  defp validate_compile_time!(module, mti, fields, mandatory, optional) do
     field_keys = Map.keys(fields)
 
     # Validate 1: Always mandatory fields must be included
-    missing_always_mandatory = @always_mandatory -- (mandatory ++ optional)
+    # Find which always-mandatory field numbers are present in the fields mapping
+    always_mandatory_names = @always_mandatory_field_numbers
+      |> Enum.map(fn field_num ->
+        Enum.find(fields, fn {_key, val} -> val == field_num end)
+      end)
+      |> Enum.filter(&(&1))
+      |> Enum.map(fn {key, _val} -> key end)
+
+    missing_always_mandatory = always_mandatory_names -- (mandatory ++ optional)
     if missing_always_mandatory != [] do
       raise CompileError,
         description: """
@@ -317,20 +326,21 @@ defmodule Ex_Iso8583.TransactionType do
         are always mandatory for ISO 8583 compliance.
 
         Module: #{inspect(module)}
+        MTI: #{inspect(mti)}
 
         Missing from `mandatory` or `optional`:
             #{inspect(missing_always_mandatory)}
 
         Please add these fields to your `mandatory` list:
-            transaction_type "#{inspect(module.mti())}" do
+            transaction_type "#{inspect(mti)}" do
               fields %{
                 # ... your existing fields ...
-                11 => "n 6",   # STAN - System Trace Audit Number
-                41 => "ans 8", # Terminal ID
-                42 => "ans 15" # Merchant ID
+                stan: 11,        # STAN - System Trace Audit Number
+                terminal_id: 41, # Terminal ID
+                merchant_id: 42  # Merchant ID
               }
 
-              mandatory #{inspect([:stan] ++ Keyword.get(fields, :mandatory, []))}
+              mandatory #{inspect([:stan] ++ mandatory)}
             end
         """
     end

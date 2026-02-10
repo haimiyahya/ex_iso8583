@@ -980,134 +980,6 @@ defmodule Iso8583.Transport.WebSocket.Socket do
     {:noreply, state}
   end
 
-  # Extract the actual TCP port from various connection structures
-  defp extract_socket_port(conn) do
-    require Logger
-    Logger.info("Extracting socket port from conn, adapter: #{inspect(conn.adapter)}")
-    # Try multiple patterns to extract the socket port
-    case conn do
-      # Bandit.Adapter with HTTP1.Socket: {Bandit.Adapter, %Bandit.Adapter{transport: %Bandit.HTTP1.Socket{socket: %ThousandIsland.Socket{socket: port}}}}}
-      %{adapter: {Bandit.Adapter, %{transport: %{socket: %{socket: port}}}}} when is_port(port) ->
-        elem(conn.adapter, 1).transport.socket.socket
-
-      # Bandit with nested socket (alternate structure)
-      %{adapter: {Bandit.Adapter, _, %{socket: %{socket: port}}}} when is_port(port) ->
-        elem(conn.adapter, 1).socket.socket
-
-      # Bandit with adapter as map
-      %{adapter: %{transport: %{socket: %{socket: port}}}} when is_port(port) ->
-        conn.adapter.transport.socket.socket
-
-      %{adapter: %{socket: %{socket: port}}} when is_port(port) ->
-        conn.adapter.socket.socket
-
-      # Direct ThousandIsland socket reference
-      %{socket: %{socket: port}} when is_port(port) ->
-        conn.socket.socket
-
-      # Raw port (Cowboy/ranch)
-      %{adapter: port} when is_port(port) ->
-        conn.adapter
-
-      # Check for deeply nested socket in adapter (tuple case)
-      %{adapter: {_module, adapter_struct}} ->
-        try do
-          find_port_in_struct(adapter_struct)
-        rescue
-          _ ->
-            find_port_in_conn_safe(conn)
-        end
-
-      # Check for deeply nested socket in adapter (map case)
-      %{adapter: adapter} when is_map(adapter) ->
-        try do
-          find_port_in_struct(adapter)
-        rescue
-          _ ->
-            find_port_in_conn_safe(conn)
-        end
-
-      # Fallback: try to find any port in the entire conn struct
-      _ ->
-        find_port_in_conn_safe(conn)
-    end
-  end
-
-  # Safe search that handles Plug.Conn and other non-enumerable structures
-  defp find_port_in_conn_safe(conn) do
-    # Only search specific fields that might contain the socket
-    potential_fields = [:adapter, :transport, :socket]
-
-    Enum.find_value(potential_fields, fn field ->
-      case Map.get(conn, field) do
-        nil -> nil
-        value when is_port(value) -> value
-        value when is_map(value) -> find_port_in_struct_safe(value)
-        value when is_list(value) -> find_port_in_struct_safe(value)
-        {_mod, _tag, struct, _, _, _} -> find_port_in_struct_safe(struct)
-        _ -> nil
-      end
-    end) || throw(:cannot_extract_socket_port)
-  end
-
-  # Recursively search for a port in nested structures
-  defp find_port_in_struct(struct) when is_map(struct) do
-    Enum.reduce_while(struct, nil, fn
-      {_key, value}, nil when is_port(value) ->
-        {:halt, value}
-
-      {_key, value}, nil when is_map(value) ->
-        case find_port_in_struct(value) do
-          port when is_port(port) -> {:halt, port}
-          _ -> {:cont, nil}
-        end
-
-      {_key, value}, nil when is_list(value) ->
-        case find_port_in_struct(value) do
-          port when is_port(port) -> {:halt, port}
-          _ -> {:cont, nil}
-        end
-
-      {_key, _value}, nil ->
-        {:cont, nil}
-
-      {_key, _}, port ->
-        {:halt, port}
-    end) || throw(:cannot_extract_socket_port)
-  end
-
-  defp find_port_in_struct(struct) when is_list(struct) do
-    Enum.find_value(struct, fn
-      value when is_port(value) -> value
-      value when is_map(value) -> find_port_in_struct_safe(value)
-      value when is_list(value) -> find_port_in_struct(value)
-      _ -> nil
-    end) || throw(:cannot_extract_socket_port)
-  end
-
-  defp find_port_in_struct(_), do: throw(:cannot_extract_socket_port)
-
-  # Safe version that returns nil instead of throwing
-  defp find_port_in_struct_safe(struct) when is_map(struct) do
-    try do
-      find_port_in_struct(struct)
-    rescue
-      :cannot_extract_socket_port -> nil
-      _ -> nil
-    end
-  end
-
-  defp find_port_in_struct_safe(struct) when is_list(struct) do
-    try do
-      find_port_in_struct(struct)
-    rescue
-      :cannot_extract_socket_port -> nil
-      _ -> nil
-    end
-  end
-
-  defp find_port_in_struct_safe(_), do: nil
-
   # WebSocket frame decoding for server-side (client sends masked frames)
   defp decode_websocket_frames(data, acc) do
     decode_frames(data, acc)
@@ -1942,11 +1814,11 @@ defmodule Iso8583.Transport.WebSocket.Client do
 
   defp mask_payload(<<>>, _mask_key, acc), do: acc
 
-  defp mask_payload(<<byte::8, rest::binary>>, <<mk1, mk2, mk3, mk4>> = mask_key, acc) do
+  defp mask_payload(<<byte::8, rest::binary>>, <<mk1, mk2, mk3, mk4>> = _mask_key, acc) do
     masked = Bitwise.bxor(byte, mk1)
     # Rotate mask key
-    mask_key = <<mk2, mk3, mk4, mk1>>
-    mask_payload(rest, mask_key, <<acc::binary, masked>>)
+    rotated_mask_key = <<mk2, mk3, mk4, mk1>>
+    mask_payload(rest, rotated_mask_key, <<acc::binary, masked>>)
   end
 
   defp frame_data(data, prefix_bytes) do

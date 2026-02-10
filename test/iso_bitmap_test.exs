@@ -1,7 +1,7 @@
 defmodule IsoBitmapTest do
   use ExUnit.Case, async: true
   use ExUnitProperties
-  use Bitwise
+  import Bitwise
   doctest IsoBitmap
 
   property "fn IsoBitmap.list_to_bitmap/1 test => eight_byte_binary_with_first_bit_not_set -> IsoBitmap.bitmap_to_list/1 -> IsoBitmap.list_to_bitmap/1 === eight_byte_binary_with_first_bit_not_set" do
