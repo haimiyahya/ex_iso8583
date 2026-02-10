@@ -297,15 +297,20 @@ defmodule Iso8583.Transport.HTTP.Server.Endpoint do
         bandit_opts
       end
 
-    case Bandit.start_link(bandit_opts) do
-      {:ok, pid} ->
-        # Try to register state
-        send(state_name, :register)
+    # Bandit is an optional dependency - check if it's available
+    if Code.ensure_loaded?(Bandit) do
+      case apply(Bandit, :start_link, [bandit_opts]) do
+        {:ok, pid} ->
+          # Try to register state
+          send(state_name, :register)
 
-        {:ok, %__MODULE__{state_name: state_name, path: path, port: port, scheme: scheme, ref: pid}}
+          {:ok, %__MODULE__{state_name: state_name, path: path, port: port, scheme: scheme, ref: pid}}
 
-      {:error, reason} ->
-        {:stop, reason}
+        {:error, reason} ->
+          {:stop, reason}
+      end
+    else
+      {:stop, {:error, :bandit_not_available}}
     end
   end
 

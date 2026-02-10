@@ -313,6 +313,10 @@ defmodule Iso8583.FieldDefinition do
       # => {2, :ascii, 40, nil}
 
   """
+  def to_iso_field_format({header_size, data_type, max_length, nil}) do
+    {header_size, convert_data_type(data_type), max_length, nil}
+  end
+
   def to_iso_field_format({header_size, data_type, max_length, opts}) when is_list(opts) do
     {header_size, convert_data_type(data_type), max_length, nil}
   end

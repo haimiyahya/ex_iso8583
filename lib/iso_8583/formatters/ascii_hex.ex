@@ -86,8 +86,6 @@ defmodule Iso8583.Formatters.AsciiHex do
   alias IsoField
   alias Iso8583.FieldDefinition
 
-  @default_header_type :ascii
-
   @doc """
   Encodes an ISOMsg to ASCII hex format.
 
@@ -197,11 +195,11 @@ defmodule Iso8583.Formatters.AsciiHex do
 
   # Encode a single field in ASCII format
   defp encode_field(field_num, value, field_def, _opts) do
-    {field_num, iso_field_format} = FieldDefinition.to_iso_field_format({field_num, field_def})
+    {header_size, iso_data_type, max_length, _padding} = FieldDefinition.to_iso_field_format(field_def)
 
     # For ASCII Hex format, fields are typically ASCII encoded
     # Use ASCII header type for variable length fields
-    IsoField.form_field({field_num, iso_field_format}, value, :ascii)
+    IsoField.form_field({field_num, {header_size, iso_data_type, max_length}}, value, :ascii)
   end
 
   # Parse fields using field definitions
@@ -218,10 +216,10 @@ defmodule Iso8583.Formatters.AsciiHex do
         parse_fields(data, rest, field_defs, acc)
 
       field_def ->
-        {field_num, iso_field_format} = FieldDefinition.to_iso_field_format({field_num, field_def})
+        {header_size, iso_data_type, max_length, _padding} = FieldDefinition.to_iso_field_format(field_def)
 
         # ASCII Hex format uses ASCII headers for variable-length fields
-        case IsoField.extract_field({field_num, iso_field_format}, {acc, data}, :ascii) do
+        case IsoField.extract_field({field_num, {header_size, iso_data_type, max_length}}, {acc, data}, :ascii) do
           {updated_acc, remaining} ->
             parse_fields(remaining, rest, field_defs, updated_acc)
         end

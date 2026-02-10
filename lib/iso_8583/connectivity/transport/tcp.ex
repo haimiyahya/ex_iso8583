@@ -355,13 +355,17 @@ defmodule Iso8583.Transport.TCP.Server do
 
   defp start_acceptors(supervisor, listen_socket, server_pid, count, opts) do
     Enum.each(1..count, fn _ ->
-      {:ok, _pid} =
-        DynamicSupervisor.start_child(
-          supervisor,
-          {Iso8583.Transport.TCP.Acceptor,
-           {listen_socket, server_pid, Keyword.get(opts, :packet_handler, :raw),
-            Keyword.get(opts, :timeout, 60_000)}}
-        )
+      args = {listen_socket, server_pid, Keyword.get(opts, :packet_handler, :raw),
+               Keyword.get(opts, :timeout, 60_000)}
+
+      child_spec = %{
+        id: {Iso8583.Transport.TCP.Acceptor, make_ref()},
+        start: {Iso8583.Transport.TCP.Acceptor, :start_link, [args]},
+        restart: :permanent,
+        type: :worker
+      }
+
+      {:ok, _pid} = DynamicSupervisor.start_child(supervisor, child_spec)
     end)
   end
 

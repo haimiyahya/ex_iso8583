@@ -193,14 +193,14 @@ defmodule Iso8583.Formatters.Binary do
 
   # Encode a single field
   defp encode_field(field_num, value, field_def, opts) do
-    {field_num, iso_field_format} = FieldDefinition.to_iso_field_format({field_num, field_def})
+    {header_size, iso_data_type, max_length, _padding} = FieldDefinition.to_iso_field_format(field_def)
     header_type = Keyword.get(opts, :header_type, @default_header_type)
 
     case header_type do
       :bcd ->
-        IsoField.form_field({field_num, iso_field_format}, value, :bcd)
+        IsoField.form_field({field_num, {header_size, iso_data_type, max_length}}, value, :bcd)
       :ascii ->
-        IsoField.form_field({field_num, iso_field_format}, value, :ascii)
+        IsoField.form_field({field_num, {header_size, iso_data_type, max_length}}, value, :ascii)
     end
   end
 
@@ -218,10 +218,10 @@ defmodule Iso8583.Formatters.Binary do
         parse_fields(data, rest, field_defs, acc)
 
       field_def ->
-        {field_num, iso_field_format} = FieldDefinition.to_iso_field_format({field_num, field_def})
+        {header_size, iso_data_type, max_length, _padding} = FieldDefinition.to_iso_field_format(field_def)
         header_type = determine_header_type(field_def)
 
-        case IsoField.extract_field({field_num, iso_field_format}, {acc, data}, header_type) do
+        case IsoField.extract_field({field_num, {header_size, iso_data_type, max_length}}, {acc, data}, header_type) do
           {updated_acc, remaining} ->
             parse_fields(remaining, rest, field_defs, updated_acc)
         end

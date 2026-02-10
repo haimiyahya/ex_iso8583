@@ -28,6 +28,7 @@ defmodule Iso8583.MixProject do
       {:stream_data, "~> 1.2"},
       {:plug, "~> 1.15", optional: true},
       {:bandit, "~> 1.5", optional: true},
+      {:websock_adapter, "~> 0.5", optional: true},
       {:jason, "~> 1.4", optional: true},
       {:ex_doc, "~> 0.30", only: :dev, runtime: false}
       # {:dep_from_hexpm, "~> 0.3.0"},
