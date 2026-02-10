@@ -385,7 +385,7 @@ defmodule Iso8583.Transport.WebSocket.Server do
   - `transport_ref` - The `WebSocket` struct
   - `client_id` - Unique connection identifier (UUID)
   - `peer_address` - Client's IP address from headers
-  - `transport_metadata` - `%{headers, path, request_uri, user_agent}`
+  - `transport_metadata` - `%{headers, path, request_uri, user_agent, connection_time, bytes_sent, bytes_received, messages_received}`
 
   ## Comparison with TCP Transport
 
@@ -923,7 +923,11 @@ defmodule Iso8583.Transport.WebSocket.Socket do
     :prefix_bytes,
     :headers,
     :buffer,
-    :socket_port
+    :socket_port,
+    :connection_time,
+    :bytes_sent,
+    :bytes_received,
+    :messages_received
   ]
 
   def start_link(opts) do
@@ -963,7 +967,11 @@ defmodule Iso8583.Transport.WebSocket.Socket do
       prefix_bytes: prefix_bytes,
       headers: headers,
       buffer: <<>>,
-      socket_port: socket_port
+      socket_port: socket_port,
+      connection_time: System.system_time(:millisecond),
+      bytes_sent: 0,
+      bytes_received: 0,
+      messages_received: 0
     }, {:continue, :setup_socket}}
   end
 
@@ -1054,58 +1062,71 @@ defmodule Iso8583.Transport.WebSocket.Socket do
   end
 
   def handle_info({:tcp, _port, data}, state) do
-    # Append data to buffer
+    # Append data to buffer and track bytes received
     new_buffer = state.buffer <> data
-    Logger.info("WebSocket received #{byte_size(data)} bytes, buffer now #{byte_size(new_buffer)} bytes")
+    bytes_received = byte_size(data)
+    Logger.info("WebSocket received #{bytes_received} bytes, buffer now #{byte_size(new_buffer)} bytes")
 
     # First decode WebSocket frames (client sends masked frames)
     case decode_websocket_frames(new_buffer, []) do
       {:ok, frame_payloads, remaining_buffer} ->
         Logger.info("Decoded #{length(frame_payloads)} WebSocket frames")
 
+        # Count messages processed
+        messages_count = 0
+
         # Extract ISO messages from each frame payload (length-prefixed)
-        Enum.each(frame_payloads, fn frame_payload ->
-          case extract_messages(frame_payload, state.prefix_bytes, []) do
+        {updated_state, _} = Enum.reduce(frame_payloads, {state, messages_count}, fn frame_payload, {acc_state, count} ->
+          case extract_messages(frame_payload, acc_state.prefix_bytes, []) do
             {:ok, messages, _} ->
               Logger.info("Extracted #{length(messages)} ISO messages from frame")
               # Process each message
-              Enum.each(messages, fn data ->
-                Logger.info("Calling get_callback from state_name: #{inspect(state.state_name)}")
-                case GenServer.call(state.state_name, :get_callback, 5000) do
+              Enum.reduce(messages, {acc_state, count}, fn data, {inner_state, inner_count} ->
+                Logger.info("Calling get_callback from state_name: #{inspect(inner_state.state_name)}")
+                case GenServer.call(inner_state.state_name, :get_callback, 5000) do
                   nil ->
                     Logger.warning("No callback registered!")
-                    :ok
+                    {inner_state, inner_count}
 
                   callback ->
-                    context = build_context(state)
+                    context = build_context(inner_state)
                     Logger.info("Calling callback with #{byte_size(data)} bytes")
                     result = callback.(data, context)
                     Logger.info("Callback returned: #{inspect(result)}")
 
                     # Send response back if callback returns {:reply, response}
-                    case result do
+                    new_state = case result do
                       {:reply, response} when is_binary(response) and byte_size(response) > 0 ->
                         Logger.info("Sending response: #{byte_size(response)} bytes")
-                        send(%__MODULE__{socket_port: state.socket_port, prefix_bytes: state.prefix_bytes}, response)
+                        send(%__MODULE__{socket_port: inner_state.socket_port, prefix_bytes: inner_state.prefix_bytes}, response)
+                        # Track bytes sent (framed response size)
+                        %{inner_state | bytes_sent: inner_state.bytes_sent + byte_size(response) + inner_state.prefix_bytes}
 
                       _ ->
                         Logger.info("No response to send")
-                        :ok
+                        inner_state
                     end
+                    # Increment messages received
+                    {new_state, inner_count + 1}
                 end
               end)
 
             :incomplete ->
               Logger.warning("Incomplete ISO message in frame")
+              {acc_state, count}
           end
         end)
 
         :erlang.send(self(), :receive)
-        {:noreply, %{state | buffer: remaining_buffer}}
+        {:noreply, %{updated_state |
+          buffer: remaining_buffer,
+          bytes_received: updated_state.bytes_received + bytes_received,
+          messages_received: updated_state.messages_received
+        }}
 
       {:error, :incomplete} ->
         # Need more data for complete WebSocket frame
-        {:noreply, %{state | buffer: new_buffer}}
+        {:noreply, %{state | buffer: new_buffer, bytes_received: state.bytes_received + bytes_received}}
     end
   end
 
@@ -1166,7 +1187,11 @@ defmodule Iso8583.Transport.WebSocket.Socket do
       transport_metadata: %{
         headers: state.headers,
         path: state.conn.request_path,
-        user_agent: Map.get(state.headers, "user-agent")
+        user_agent: Map.get(state.headers, "user-agent"),
+        connection_time: state.connection_time,
+        bytes_sent: state.bytes_sent,
+        bytes_received: state.bytes_received,
+        messages_received: state.messages_received
       }
     )
   end
