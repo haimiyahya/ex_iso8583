@@ -559,6 +559,62 @@ defmodule TransactionProcessor do
       end
 
       @doc """
+      Encodes a response struct to binary ISO 8583 format.
+
+      ## Parameters
+
+        - `response_struct` - The response struct to encode
+        - `msg_type` - Message type configuration
+        - `field_formats` - Field format definitions
+
+      ## Returns
+
+        - `{:ok, binary}` - Successfully encoded message
+        - `{:error, reason}` - Encoding failed
+
+      ## Example
+
+          {:ok, binary} = MyProcessor.encode_response(
+            %SaleResponse{stan: "000001", response_code: "00"},
+            %{bitmap_type: :binary, field_header_type: :bcd},
+            %{2 => "n..19", 3 => "n 6", ...}
+          )
+      """
+      @spec encode_response(struct(), map(), map()) :: {:ok, binary()} | {:error, term()}
+      def encode_response(response_struct, msg_type, field_formats) do
+        TransactionProcessor.encode_response(response_struct, msg_type, field_formats)
+      end
+
+      @doc """
+      Processes an ISO 8583 message and returns the encoded response binary.
+
+      ## Parameters
+
+        - `raw_message` - Raw ISO 8583 binary message (with MTI)
+        - `context` - Optional context map
+        - `msg_type` - Message type configuration
+        - `field_formats` - Field format definitions
+
+      ## Returns
+
+        - `{:ok, binary}` - Successfully processed and encoded response
+        - `{:error, reason}` - Processing or encoding failed
+
+      ## Example
+
+          {:ok, response_binary} = MyProcessor.process_and_encode(
+            raw_iso_message,
+            %{},
+            %{bitmap_type: :binary, field_header_type: :bcd},
+            %{2 => "n..19", 3 => "n 6", ...}
+          )
+      """
+      @spec process_and_encode(binary(), map(), map(), map()) :: {:ok, binary()} | {:error, term()}
+      def process_and_encode(raw_message, context \\ %{}, msg_type, field_formats) do
+        TransactionProcessor.process_and_encode(__MODULE__, raw_message, context, msg_type, field_formats)
+      end
+
+      @doc """
       Adds middleware to the processing pipeline.
 
       Middleware are executed in the order they are added.
@@ -798,6 +854,74 @@ defmodule TransactionProcessor do
         :error -> acc
       end
     end)
+  end
+
+  @doc """
+  Encodes a response struct to binary ISO 8583 format.
+
+  Uses the response module's `form_and_validate/3` function to encode the struct.
+
+  ## Parameters
+
+    - `response_struct` - The response struct to encode
+    - `msg_type` - Message type configuration (e.g., `%{bitmap_type: :binary, field_header_type: :bcd}`)
+    - `field_formats` - Field format definitions
+
+  ## Returns
+
+    - `{:ok, binary}` - Successfully encoded message
+    - `{:error, reason}` - Encoding failed
+
+  ## Example
+
+      {:ok, binary} = TransactionProcessor.encode_response(
+        %SaleResponse{stan: "000001", response_code: "00"},
+        %{bitmap_type: :binary, field_header_type: :bcd},
+        %{2 => "n..19", 3 => "n 6", ...}
+      )
+  """
+  @spec encode_response(struct(), map(), map()) :: {:ok, binary()} | {:error, term()}
+  def encode_response(response_struct, msg_type, field_formats) do
+    response_struct.__struct__.form_and_validate(response_struct, msg_type, field_formats)
+  end
+
+  @doc """
+  Processes an ISO 8583 message and returns the encoded response binary.
+
+  This is a convenience function that combines `process/3` and `encode_response/3`.
+
+  ## Parameters
+
+    - `processor_module` - The processor module (e.g., MyProcessor)
+    - `raw_message` - Raw ISO 8583 binary message (with MTI)
+    - `context` - Optional context map
+    - `msg_type` - Message type configuration
+    - `field_formats` - Field format definitions
+
+  ## Returns
+
+    - `{:ok, binary}` - Successfully processed and encoded response
+    - `{:error, reason}` - Processing or encoding failed
+
+  ## Example
+
+      {:ok, response_binary} = TransactionProcessor.process_and_encode(
+        MyProcessor,
+        raw_iso_message,
+        %{},
+        %{bitmap_type: :binary, field_header_type: :bcd},
+        %{2 => "n..19", 3 => "n 6", ...}
+      )
+  """
+  @spec process_and_encode(module(), binary(), map(), map(), map()) :: {:ok, binary()} | {:error, term()}
+  def process_and_encode(processor_module, raw_message, context, msg_type, field_formats) do
+    with {:ok, response_struct} <- process(processor_module, raw_message, context),
+         {:ok, binary} <- encode_response(response_struct, msg_type, field_formats) do
+      {:ok, binary}
+    else
+      {:error, _reason} = error -> error
+      error -> {:error, error}
+    end
   end
 end
 

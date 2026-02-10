@@ -283,11 +283,41 @@ defmodule Ex_Iso8583.TransactionType do
   defp macro_escape(nil), do: nil
   defp macro_escape(term), do: Macro.escape(term)
 
+  # Always mandatory ISO 8583 fields (critical for transaction processing)
+  @always_mandatory [11, 41, 42]  # STAN, Terminal ID, Merchant ID
+
   # Compile-time validation for transaction type definitions
-  defp validate_compile_time!(_module, fields, mandatory, optional) do
+  defp validate_compile_time!(module, fields, mandatory, optional) do
     field_keys = Map.keys(fields)
 
-    # Validate 1: All mandatory fields must exist in fields mapping
+    # Validate 1: Always mandatory fields must be included
+    missing_always_mandatory = @always_mandatory -- (mandatory ++ optional)
+    if missing_always_mandatory != [] do
+      raise CompileError,
+        description: """
+        [Ex_Iso8583.TransactionType] Fields 11 (STAN), 41 (Terminal ID), and 42 (Merchant ID) \
+        are always mandatory for ISO 8583 compliance.
+
+        Module: #{inspect(module)}
+
+        Missing from `mandatory` or `optional`:
+            #{inspect(missing_always_mandatory)}
+
+        Please add these fields to your `mandatory` list:
+            transaction_type "#{inspect(module.mti())}" do
+              fields %{
+                # ... your existing fields ...
+                11 => "n 6",   # STAN - System Trace Audit Number
+                41 => "ans 8", # Terminal ID
+                42 => "ans 15" # Merchant ID
+              }
+
+              mandatory #{inspect([:stan] ++ Keyword.get(fields, :mandatory, []))}
+            end
+        """
+    end
+
+    # Validate 2: All mandatory fields must exist in fields mapping
     invalid_mandatory = mandatory -- field_keys
     if invalid_mandatory != [] do
       raise CompileError,
@@ -300,7 +330,7 @@ defmodule Ex_Iso8583.TransactionType do
         """
     end
 
-    # Validate 2: All optional fields must exist in fields mapping
+    # Validate 3: All optional fields must exist in fields mapping
     invalid_optional = optional -- field_keys
     if invalid_optional != [] do
       raise CompileError,
@@ -313,7 +343,7 @@ defmodule Ex_Iso8583.TransactionType do
         """
     end
 
-    # Validate 3: mandatory and optional should not overlap
+    # Validate 4: mandatory and optional should not overlap
     overlap = MapSet.new(mandatory) |> MapSet.intersection(MapSet.new(optional)) |> MapSet.to_list()
     if overlap != [] do
       raise CompileError,
