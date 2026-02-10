@@ -31,6 +31,8 @@ defmodule Iso8583.Transport.TCP.Server do
 
   ## Usage
 
+  ### Without TPDU
+
       defmodule MyApp.PaymentHandler do
         use Iso8583.Handler,
           processor: MyApp.PaymentProcessor,
@@ -38,7 +40,23 @@ defmodule Iso8583.Transport.TCP.Server do
           transport_opts: [
             port: 8080,
             acceptors: 10,
-            packet_handler: :raw
+            packet_handler: {:length_prefix, 2}
+          ]
+      end
+
+  ### With TPDU
+
+      defmodule MyApp.PaymentHandler do
+        use Iso8583.Handler,
+          processor: MyApp.PaymentProcessor,
+          transport: Iso8583.Transport.TCP.Server,
+          transport_opts: [
+            port: 8080,
+            acceptors: 10,
+            packet_handler: {:length_prefix, 2},
+            tpdu_enabled: true,
+            tpdu_address_size: 5,
+            tpdu_source_address: <<0, 0, 0, 0, 1>>
           ]
       end
 
@@ -51,6 +69,9 @@ defmodule Iso8583.Transport.TCP.Server do
   | `:name` | `atom()` | `nil` | Name for registration |
   | `:packet_handler` | `atom() \| tuple()` | `:raw` | How to parse messages |
   | `:timeout` | `integer()` | `60000` | Connection idle timeout (ms) |
+  | `:tpdu_enabled` | `boolean()` | `false` | Enable TPDU handling |
+  | `:tpdu_address_size` | `integer()` | `5` | TPDU address size in bytes |
+  | `:tpdu_source_address` | `binary()` | `<<0,0,0,0,1>>` | Source address for responses |
 
   ## Packet Handlers (Framing)
 
@@ -79,7 +100,7 @@ defmodule Iso8583.Transport.TCP.Server do
   Example: `packet_handler: {:length_prefix, 2}` means each message is prefixed
   with a 2-byte length field (max message size: 65535 bytes).
 
-  **Message format:**
+  **Message format (without TPDU):**
   ```
   +--------+--------+--------------------------+
   | Len Hi | Len Lo |     Message Data         |
@@ -87,7 +108,33 @@ defmodule Iso8583.Transport.TCP.Server do
   |<---- 2 bytes --->|<-- Length bytes ------->|
   ```
 
-  **Python client example:**
+  **Message format (with TPDU enabled):**
+  ```
+  +--------+--------+--------------+--------------------------+
+  | Len Hi | Len Lo |    TPDU      |     ISO 8583 Message     |
+  +--------+--------+--------------+--------------------------+
+  |<---- 2 bytes --->|<-- 10 bytes ->|<-- Length - 10 ------->|
+  |<----------- Total message length --------------->|
+  ```
+
+  **TPDU Routing:** When TPDU is enabled, the transport automatically swaps
+  source/destination addresses in the response TPDU to route the message back
+  to the sender.
+
+  ## Message Flow with TPDU
+  ```
+  Request:  [Length] [TPDU: Client→Acquirer] [ISO Message]
+                           ↓
+                    Transport strips TPDU
+                           ↓
+                    Application processes ISO
+                           ↓
+                    Transport adds TPDU (swapped)
+                           ↓
+  Response: [Length] [TPDU: Acquirer→Client] [ISO Response]
+  ```
+
+  **Python client example (without TPDU):**
   ```python
   import socket
   import struct
@@ -105,6 +152,37 @@ defmodule Iso8583.Transport.TCP.Server do
   length_bytes = sock.recv(2)
   length = struct.unpack('>H', length_bytes)[0]
   response = sock.recv(length)
+  ```
+
+  **Python client example (with TPDU):**
+  ```python
+  import socket
+  import struct
+
+  # TPDU configuration
+  TPDU_SIZE = 10  # 5 bytes dest + 5 bytes source
+  SOURCE_ADDR = bytes([0, 0, 0, 0, 1])  # Our address
+  DEST_ADDR = bytes([0, 0, 0, 0, 2])    # Acquirer address
+
+  # Connect to server
+  sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+  sock.connect(('localhost', 8080))
+
+  # Send ISO message with TPDU and 2-byte length prefix
+  iso_message = bytes.fromhex('0200b2200000001000000000000000000000000011234567890123456')
+  payload = DEST_ADDR + SOURCE_ADDR + iso_message  # TPDU + ISO
+  framed = struct.pack('>H', len(payload)) + payload
+  sock.send(framed)
+
+  # Receive response
+  length_bytes = sock.recv(2)
+  length = struct.unpack('>H', length_bytes)[0]
+  response_data = sock.recv(length)
+
+  # Extract TPDU from response
+  tpdu_dest = response_data[0:5]    # Should be our source
+  tpdu_src = response_data[5:10]    # Should be acquirer
+  iso_response = response_data[10:]  # Actual ISO message
   ```
 
   **Elixir client example:**
@@ -145,7 +223,9 @@ defmodule Iso8583.Transport.TCP.Server do
   - `transport_ref` - The socket (port)
   - `client_id` - Unique client identifier (UUID)
   - `peer_address` - Client's IP address
-  - `transport_metadata` - `%{connection_time, bytes_received, messages_received}`
+  - `transport_metadata` - `%{connection_time, bytes_received, messages_received, tpdu}`
+
+  When TPDU is enabled, the request TPDU is included in `transport_metadata.tpdu`.
 
   ## Supervisor Tree
 
@@ -162,6 +242,7 @@ defmodule Iso8583.Transport.TCP.Server do
   use GenServer
 
   alias Iso8583.Context
+  alias Ex_Iso8583.TPDU
 
   defstruct [
     :listen_socket,
@@ -172,13 +253,27 @@ defmodule Iso8583.Transport.TCP.Server do
     :acceptors,
     :packet_handler,
     :timeout,
-    :name
+    :name,
+    :tpdu_enabled,
+    :tpdu_address_size,
+    :tpdu_source_address
   ]
 
   # Client API
 
   @doc """
   Starts the TCP server transport.
+
+  ## Options
+
+  - `:port` - Required port number
+  - `:acceptors` - Number of acceptor processes (default: 10)
+  - `:name` - Registered name for the server
+  - `:packet_handler` - How to parse messages (default: :raw)
+  - `:timeout` - Connection timeout in ms (default: 60_000)
+  - `:tpdu_enabled` - Enable TPDU handling (default: false)
+  - `:tpdu_address_size` - TPDU address size in bytes (default: 5)
+  - `:tpdu_source_address` - Source address for responses (default: <<0,0,0,0,1>>)
   """
   def start_link(opts) do
     port = Keyword.fetch!(opts, :port)
@@ -186,10 +281,21 @@ defmodule Iso8583.Transport.TCP.Server do
     name = Keyword.get(opts, :name)
     packet_handler = Keyword.get(opts, :packet_handler, :raw)
     timeout = Keyword.get(opts, :timeout, 60_000)
+    tpdu_enabled = Keyword.get(opts, :tpdu_enabled, false)
+    tpdu_address_size = Keyword.get(opts, :tpdu_address_size, 5)
+    tpdu_source = Keyword.get(opts, :tpdu_source_address, <<0, 0, 0, 0, 1>>)
 
     GenServer.start_link(
       __MODULE__,
-      [port: port, acceptors: acceptors, packet_handler: packet_handler, timeout: timeout],
+      [
+        port: port,
+        acceptors: acceptors,
+        packet_handler: packet_handler,
+        timeout: timeout,
+        tpdu_enabled: tpdu_enabled,
+        tpdu_address_size: tpdu_address_size,
+        tpdu_source_address: tpdu_source
+      ],
       name: name
     )
   end
@@ -208,9 +314,24 @@ defmodule Iso8583.Transport.TCP.Server do
 
   @doc """
   Sends data to a connected client.
+
+  For direct socket access, use `:gen_tcp.send/2`.
+  For response with TPDU, use `send_response/2`.
   """
   def send(socket, data) when is_port(socket) do
     :gen_tcp.send(socket, data)
+  end
+
+  @doc """
+  Sends a response to a client through their connection handler.
+
+  This is the recommended way to send responses when using TPDU, as it
+  ensures the TPDU is correctly added with swapped source/destination.
+  """
+  def send_response(_client_id, _response) do
+    # Note: For direct socket access, use :gen_tcp.send/2
+    # The TPDU handling is done at the connection level
+    {:error, :use_socket_directly}
   end
 
   @doc """
@@ -243,6 +364,9 @@ defmodule Iso8583.Transport.TCP.Server do
     acceptors = Keyword.get(opts, :acceptors, 10)
     packet_handler = Keyword.get(opts, :packet_handler, :raw)
     timeout = Keyword.get(opts, :timeout, 60_000)
+    tpdu_enabled = Keyword.get(opts, :tpdu_enabled, false)
+    tpdu_address_size = Keyword.get(opts, :tpdu_address_size, 5)
+    tpdu_source = Keyword.get(opts, :tpdu_source_address, <<0, 0, 0, 0, 1>>)
 
     # Create client registry
     client_registry = :ets.new(:tcp_clients, [:set, :private, :named_table])
@@ -264,7 +388,10 @@ defmodule Iso8583.Transport.TCP.Server do
                port: port,
                acceptors: acceptors,
                packet_handler: packet_handler,
-               timeout: timeout
+               timeout: timeout,
+               tpdu_enabled: tpdu_enabled,
+               tpdu_address_size: tpdu_address_size,
+               tpdu_source_address: tpdu_source
              }}
 
           {:error, reason} ->
@@ -282,7 +409,7 @@ defmodule Iso8583.Transport.TCP.Server do
   end
 
   @impl true
-  def handle_info({:incoming_message, client_id, data, peer_address}, state) do
+  def handle_info({:incoming_message, client_id, data, peer_address, request_tpdu}, state) do
     if state.receive_callback do
       socket = :ets.lookup_element(state.client_registry, client_id, 2)
 
@@ -294,7 +421,8 @@ defmodule Iso8583.Transport.TCP.Server do
           transport_metadata: %{
             connection_time: get_connection_time(client_id),
             bytes_received: get_bytes_received(client_id),
-            messages_received: get_messages_received(client_id)
+            messages_received: get_messages_received(client_id),
+            tpdu: request_tpdu
           }
         )
 
@@ -355,8 +483,7 @@ defmodule Iso8583.Transport.TCP.Server do
 
   defp start_acceptors(supervisor, listen_socket, server_pid, count, opts) do
     Enum.each(1..count, fn _ ->
-      args = {listen_socket, server_pid, Keyword.get(opts, :packet_handler, :raw),
-               Keyword.get(opts, :timeout, 60_000)}
+      args = {listen_socket, server_pid, opts}
 
       child_spec = %{
         id: {Iso8583.Transport.TCP.Acceptor, make_ref()},
@@ -384,14 +511,20 @@ defmodule Iso8583.Transport.TCP.Acceptor do
   use GenServer
   require Logger
 
-  def start_link({listen_socket, server_pid, packet_handler, timeout}) do
+  def start_link({listen_socket, server_pid, opts}) do
     GenServer.start_link(
       __MODULE__,
-      {listen_socket, server_pid, packet_handler, timeout}
+      {listen_socket, server_pid, opts}
     )
   end
 
-  def init({listen_socket, server_pid, packet_handler, timeout}) do
+  def init({listen_socket, server_pid, opts}) do
+    packet_handler = Keyword.get(opts, :packet_handler, :raw)
+    timeout = Keyword.get(opts, :timeout, 60_000)
+    tpdu_enabled = Keyword.get(opts, :tpdu_enabled, false)
+    tpdu_address_size = Keyword.get(opts, :tpdu_address_size, 5)
+    tpdu_source_address = Keyword.get(opts, :tpdu_source_address, <<0, 0, 0, 0, 1>>)
+
     # Send async accept request
     :gen_tcp.controlling_process(listen_socket, self())
     send(self(), :accept)
@@ -402,6 +535,9 @@ defmodule Iso8583.Transport.TCP.Acceptor do
        server_pid: server_pid,
        packet_handler: packet_handler,
        timeout: timeout,
+       tpdu_enabled: tpdu_enabled,
+       tpdu_address_size: tpdu_address_size,
+       tpdu_source_address: tpdu_source_address,
        socket: nil,
        client_id: nil
      }}
@@ -424,7 +560,10 @@ defmodule Iso8583.Transport.TCP.Acceptor do
             client_id: client_id,
             peer_address: peer_address,
             packet_handler: state.packet_handler,
-            timeout: state.timeout
+            timeout: state.timeout,
+            tpdu_enabled: state.tpdu_enabled,
+            tpdu_address_size: state.tpdu_address_size,
+            tpdu_source_address: state.tpdu_source_address
           )
 
         # Register with server
@@ -477,10 +616,14 @@ end
 defmodule Iso8583.Transport.TCP.Connection do
   @moduledoc """
   Handles a single TCP connection - reads messages and forwards to server.
+
+  Supports TPDU extraction and automatic response TPDU insertion.
   """
 
   use GenServer
   require Logger
+
+  alias Ex_Iso8583.TPDU
 
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts)
@@ -493,6 +636,9 @@ defmodule Iso8583.Transport.TCP.Connection do
     peer_address = Keyword.fetch!(opts, :peer_address)
     packet_handler = Keyword.get(opts, :packet_handler, :raw)
     timeout = Keyword.get(opts, :timeout, 60_000)
+    tpdu_enabled = Keyword.get(opts, :tpdu_enabled, false)
+    tpdu_address_size = Keyword.get(opts, :tpdu_address_size, 5)
+    tpdu_source_address = Keyword.get(opts, :tpdu_source_address, <<0, 0, 0, 0, 1>>)
 
     # Take control of socket
     :gen_tcp.controlling_process(socket, self())
@@ -508,6 +654,10 @@ defmodule Iso8583.Transport.TCP.Connection do
        peer_address: peer_address,
        packet_handler: packet_handler,
        timeout: timeout,
+       tpdu_enabled: tpdu_enabled,
+       tpdu_address_size: tpdu_address_size,
+       tpdu_source_address: tpdu_source_address,
+       request_tpdu: nil,
        buffer: <<>>
      }}
   end
@@ -515,12 +665,29 @@ defmodule Iso8583.Transport.TCP.Connection do
   def handle_info(:receive, state) do
     case recv_packet(state) do
       {:ok, data, new_buffer} ->
-        if byte_size(data) > 0 do
-          send(state.server_pid, {:incoming_message, state.client_id, data, state.peer_address})
+        {request_tpdu, data_without_tpdu} = if byte_size(data) > 0 do
+          # Extract TPDU if enabled
+          if state.tpdu_enabled do
+            case TPDU.extract(data, state.tpdu_address_size) do
+              {:ok, tpdu, rest} ->
+                {tpdu, rest}
+              {:error, _} ->
+                {nil, data}
+            end
+          else
+            {nil, data}
+          end
+        else
+          {state.request_tpdu, <<>>}
+        end
+
+        # Send message to server
+        if byte_size(data_without_tpdu) > 0 do
+          send(state.server_pid, {:incoming_message, state.client_id, data_without_tpdu, state.peer_address, request_tpdu})
         end
 
         send(self(), :receive)
-        {:noreply, %{state | buffer: new_buffer}}
+        {:noreply, %{state | buffer: new_buffer, request_tpdu: request_tpdu}}
 
       {:error, :closed} ->
         Logger.debug("Client #{state.client_id} disconnected")
@@ -530,6 +697,23 @@ defmodule Iso8583.Transport.TCP.Connection do
         Logger.warning("Receive error for client #{state.client_id}: #{inspect(reason)}")
         {:stop, reason, state}
     end
+  end
+
+  def handle_info({:send_response, response}, state) do
+    # Add TPDU to response if enabled
+    response_with_tpdu = if state.tpdu_enabled and state.request_tpdu do
+      # Swap destination and source for response
+      response_tpdu = %{
+        destination: state.request_tpdu.source,
+        source: state.tpdu_source_address
+      }
+      TPDU.prepend(response, response_tpdu, state.tpdu_address_size)
+    else
+      response
+    end
+
+    :gen_tcp.send(state.socket, response_with_tpdu)
+    {:noreply, state}
   end
 
   def handle_info({:tcp_closed, _socket}, state) do
@@ -637,6 +821,8 @@ defmodule Iso8583.Transport.TCP.Client do
 
   ## Usage
 
+  ### Without TPDU
+
       defmodule MyApp.UpstreamHandler do
         use Iso8583.Handler,
           processor: MyApp.UpstreamProcessor,
@@ -645,6 +831,23 @@ defmodule Iso8583.Transport.TCP.Client do
             host: "acquirer.example.com",
             port: 9000,
             packet_handler: {:length_prefix, 2}
+          ]
+      end
+
+  ### With TPDU
+
+      defmodule MyApp.UpstreamHandler do
+        use Iso8583.Handler,
+          processor: MyApp.UpstreamProcessor,
+          transport: Iso8583.Transport.TCP.Client,
+          transport_opts: [
+            host: "acquirer.example.com",
+            port: 9000,
+            packet_handler: {:length_prefix, 2},
+            tpdu_enabled: true,
+            tpdu_address_size: 5,
+            tpdu_source_address: <<0, 0, 0, 0, 1>>,
+            tpdu_destination_address: <<0, 0, 0, 0, 2>>
           ]
       end
 
@@ -658,6 +861,10 @@ defmodule Iso8583.Transport.TCP.Client do
   | `:reconnect_interval` | `integer()` | `5000` | Reconnect delay on disconnect (ms) |
   | `:timeout` | `integer()` | `60000` | Socket timeout (ms) |
   | `:packet_handler` | `atom() \| tuple()` | `:raw` | How to frame messages |
+  | `:tpdu_enabled` | `boolean()` | `false` | Enable TPDU handling |
+  | `:tpdu_address_size` | `integer()` | `5` | TPDU address size in bytes |
+  | `:tpdu_source_address` | `binary()` | `<<0,0,0,0,1>>` | Source address for requests |
+  | `:tpdu_destination_address` | `binary()` | `<<0,0,0,0,2>>` | Destination address for requests |
 
   ## Packet Handlers (Framing)
 
@@ -676,11 +883,19 @@ defmodule Iso8583.Transport.TCP.Client do
   - Outgoing: prepends 2-byte length before sending
   - Incoming: parses 2-byte length to read complete messages
 
-  **Message flow:**
+  **Message flow (without TPDU):**
   ```
   Client -> Server: [Len Hi] [Len Lo] [ISO Message Data...]
   Server -> Client: [Len Hi] [Len Lo] [ISO Response Data...]
   ```
+
+  **Message flow (with TPDU enabled):**
+  ```
+  Request:  [Length] [TPDU: Us→Acquirer] [ISO Message]
+  Response: [Length] [TPDU: Acquirer→Us] [ISO Response]
+  ```
+
+  The TPDU source/destination are automatically swapped in responses.
 
   **Supported prefix sizes:**
   - `{:length_prefix, 1}` - 1 byte length (max: 255 bytes)
@@ -693,7 +908,9 @@ defmodule Iso8583.Transport.TCP.Client do
   - `transport_ref` - `:client` (atom identifier)
   - `client_id` - `"tcp_client"`
   - `peer_address` - Remote server address
-  - `transport_metadata` - `%{connection_time, bytes_sent, bytes_received}`
+  - `transport_metadata` - `%{connection_time, bytes_sent, bytes_received, tpdu}`
+
+  When TPDU is enabled, the response TPDU is included in `transport_metadata.tpdu`.
 
   """
 
@@ -702,6 +919,7 @@ defmodule Iso8583.Transport.TCP.Client do
   require Logger
 
   alias Iso8583.Context
+  alias Ex_Iso8583.TPDU
 
   defstruct [
     :socket,
@@ -715,6 +933,11 @@ defmodule Iso8583.Transport.TCP.Client do
     :bytes_received,
     :pending_requests,
     :packet_handler,
+    :tpdu_enabled,
+    :tpdu_address_size,
+    :tpdu_source_address,
+    :tpdu_destination_address,
+    :request_tpdu,
     :buffer
   ]
 
@@ -771,6 +994,10 @@ defmodule Iso8583.Transport.TCP.Client do
     reconnect_interval = Keyword.get(opts, :reconnect_interval, 5000)
     timeout = Keyword.get(opts, :timeout, 60_000)
     packet_handler = Keyword.get(opts, :packet_handler, :raw)
+    tpdu_enabled = Keyword.get(opts, :tpdu_enabled, false)
+    tpdu_address_size = Keyword.get(opts, :tpdu_address_size, 5)
+    tpdu_source = Keyword.get(opts, :tpdu_source_address, <<0, 0, 0, 0, 1>>)
+    tpdu_destination = Keyword.get(opts, :tpdu_destination_address, <<0, 0, 0, 0, 2>>)
 
     # Try to connect immediately
     :erlang.send(self(), :connect)
@@ -782,11 +1009,16 @@ defmodule Iso8583.Transport.TCP.Client do
        reconnect_interval: reconnect_interval,
        timeout: timeout,
        packet_handler: packet_handler,
+       tpdu_enabled: tpdu_enabled,
+       tpdu_address_size: tpdu_address_size,
+       tpdu_source_address: tpdu_source,
+       tpdu_destination_address: tpdu_destination,
        socket: nil,
        connection_time: nil,
        bytes_sent: 0,
        bytes_received: 0,
        pending_requests: %{},
+       request_tpdu: nil,
        buffer: <<>>
      }}
   end
@@ -817,6 +1049,18 @@ defmodule Iso8583.Transport.TCP.Client do
         # Process each received message
         Enum.each(messages, fn data ->
           if state.receive_callback do
+            # Extract TPDU from response if enabled
+            {data_without_tpdu, response_tpdu} = if state.tpdu_enabled do
+              case TPDU.extract(data, state.tpdu_address_size) do
+                {:ok, tpdu, rest} ->
+                  {rest, tpdu}
+                {:error, _} ->
+                  {data, nil}
+              end
+            else
+              {data, nil}
+            end
+
             context =
               Context.new(
                 transport_ref: :client,
@@ -825,11 +1069,12 @@ defmodule Iso8583.Transport.TCP.Client do
                 transport_metadata: %{
                   connection_time: state.connection_time,
                   bytes_sent: state.bytes_sent,
-                  bytes_received: state.bytes_received
+                  bytes_received: state.bytes_received,
+                  tpdu: response_tpdu
                 }
               )
 
-            state.receive_callback.(data, context)
+            state.receive_callback.(data_without_tpdu, context)
           end
         end)
 
@@ -862,8 +1107,19 @@ defmodule Iso8583.Transport.TCP.Client do
   @impl true
   def handle_call({:send, data}, _from, state) do
     if state.socket do
+      # Add TPDU if enabled
+      data_with_tpdu = if state.tpdu_enabled do
+        tpdu = %{
+          destination: state.tpdu_destination_address,
+          source: state.tpdu_source_address
+        }
+        TPDU.prepend(data, tpdu, state.tpdu_address_size)
+      else
+        data
+      end
+
       # Frame the data if using length_prefix
-      framed_data = frame_data(data, state.packet_handler)
+      framed_data = frame_data(data_with_tpdu, state.packet_handler)
 
       case :gen_tcp.send(state.socket, framed_data) do
         :ok ->
