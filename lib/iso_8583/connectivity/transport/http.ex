@@ -166,9 +166,13 @@ defmodule Iso8583.Transport.HTTP.Server do
   Looks up an HTTP server by registered name.
   """
   def lookup_server(name) when is_atom(name) do
-    case Registry.lookup(Iso8583.HTTP.Registry, name) do
-      [{pid, _}] when is_pid(pid) -> {:ok, pid}
-      _ -> {:error, :not_found}
+    try do
+      case Registry.lookup(Iso8583.HTTP.Registry, name) do
+        [{pid, _}] when is_pid(pid) -> {:ok, pid}
+        _ -> {:error, :not_found}
+      end
+    rescue
+      ArgumentError -> {:error, :not_found}
     end
   end
 

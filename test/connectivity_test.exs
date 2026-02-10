@@ -666,6 +666,42 @@ defmodule Iso8583.Transport.TCP.ClientTest do
       Client.stop(pid)
       stop_echo_server(port)
     end
+
+    test "sets callback by registered name" do
+      port = start_echo_server()
+      {:ok, _pid} = Client.start_link(host: "localhost", port: port, name: :test_tcp_callback_client)
+
+      test_pid = self()
+      callback = fn _data, _context -> send(test_pid, {:received, :ok}) end
+
+      assert :ok = Client.set_receive_callback(:test_tcp_callback_client, callback)
+
+      Client.stop(:test_tcp_callback_client)
+      stop_echo_server(port)
+    end
+
+    test "returns error for non-existent client when setting callback by name" do
+      callback = fn _data, _context -> :ok end
+
+      assert {:error, :not_found} = Client.set_receive_callback(:non_existent_tcp_client, callback)
+    end
+  end
+
+  describe "lookup_client/1" do
+    test "looks up client by registered name" do
+      port = start_echo_server()
+      {:ok, pid} = Client.start_link(host: "localhost", port: port, name: :test_lookup_tcp_client)
+
+      assert {:ok, lookup_pid} = Client.lookup_client(:test_lookup_tcp_client)
+      assert lookup_pid == pid
+
+      Client.stop(:test_lookup_tcp_client)
+      stop_echo_server(port)
+    end
+
+    test "returns error for non-existent client" do
+      assert {:error, :not_found} = Client.lookup_client(:non_existent_tcp_client)
+    end
   end
 
   describe "send/2" do
@@ -678,6 +714,20 @@ defmodule Iso8583.Transport.TCP.ClientTest do
       Client.stop(pid)
       stop_echo_server(port)
     end
+
+    test "sends data by registered name" do
+      port = start_echo_server()
+      {:ok, _pid} = Client.start_link(host: "localhost", port: port, name: :test_tcp_send_client)
+
+      assert :ok = Client.send(:test_tcp_send_client, <<0x02, 0x00, 0xB2, 0x20>>)
+
+      Client.stop(:test_tcp_send_client)
+      stop_echo_server(port)
+    end
+
+    test "returns error when sending to non-existent client by name" do
+      assert {:error, :not_found} = Client.send(:non_existent_tcp_client, <<0x02, 0x00>>)
+    end
   end
 
   describe "stop/1" do
@@ -688,6 +738,38 @@ defmodule Iso8583.Transport.TCP.ClientTest do
       assert :ok = Client.stop(pid)
       refute Process.alive?(pid)
 
+      stop_echo_server(port)
+    end
+
+    test "stops client by name" do
+      port = start_echo_server()
+      {:ok, _pid} = Client.start_link(host: "localhost", port: port, name: :test_tcp_stop_client)
+
+      assert :ok = Client.stop(:test_tcp_stop_client)
+
+      # Give it time to stop
+      Process.sleep(50)
+      assert {:error, :not_found} = Client.lookup_client(:test_tcp_stop_client)
+
+      stop_echo_server(port)
+    end
+
+    test "returns error for non-existent client" do
+      assert {:error, :not_found} = Client.stop(:non_existent_tcp_client)
+    end
+  end
+
+  describe "connection stats tracking" do
+    test "initializes connection stats to zero" do
+      port = start_echo_server()
+      {:ok, pid} = Client.start_link(host: "localhost", port: port)
+
+      state = :sys.get_state(pid)
+      assert state.bytes_sent == 0
+      assert state.bytes_received == 0
+      assert state.messages_received == 0
+
+      Client.stop(pid)
       stop_echo_server(port)
     end
   end
@@ -839,6 +921,124 @@ defmodule Iso8583.Transport.HTTP.ServerTest do
       assert spec.id == Iso8583.Transport.HTTP.Server
       assert spec.restart == :permanent
       assert spec.type == :supervisor
+    end
+  end
+
+  describe "lookup_server/1" do
+    test "looks up server by registered name" do
+      port = get_available_port()
+
+      {:ok, _pid} = Iso8583.Transport.HTTP.Server.start_link(
+        port: port,
+        name: :test_http_lookup_server
+      )
+
+      assert {:ok, server_pid} = Iso8583.Transport.HTTP.Server.lookup_server(:test_http_lookup_server)
+      assert is_pid(server_pid)
+
+      Iso8583.Transport.HTTP.Server.stop(:test_http_lookup_server)
+      Process.sleep(100)
+    end
+
+    test "returns error for non-existent server" do
+      assert {:error, :not_found} = Iso8583.Transport.HTTP.Server.lookup_server(:non_existent_http_server)
+    end
+  end
+
+  describe "set_receive_callback/2" do
+    test "sets callback by registered name" do
+      port = get_available_port()
+
+      {:ok, _pid} = Iso8583.Transport.HTTP.Server.start_link(
+        port: port,
+        name: :test_http_callback_server
+      )
+
+      test_pid = self()
+      callback = fn _data, _context -> send(test_pid, {:http_received, :ok}) end
+
+      assert :ok = Iso8583.Transport.HTTP.Server.set_receive_callback(:test_http_callback_server, callback)
+
+      Iso8583.Transport.HTTP.Server.stop(:test_http_callback_server)
+      Process.sleep(100)
+    end
+
+    test "returns error for non-existent server when setting callback by name" do
+      callback = fn _data, _context -> :ok end
+
+      assert {:error, :not_found} = Iso8583.Transport.HTTP.Server.set_receive_callback(:non_existent_http_server, callback)
+    end
+  end
+
+  describe "stop/2" do
+    test "stops server by name" do
+      port = get_available_port()
+
+      {:ok, _pid} = Iso8583.Transport.HTTP.Server.start_link(
+        port: port,
+        name: :test_http_stop_server
+      )
+
+      # Verify server is running
+      assert {:ok, _registered_pid} = Iso8583.Transport.HTTP.Server.lookup_server(:test_http_stop_server)
+
+      # Stop the server
+      assert :ok = Iso8583.Transport.HTTP.Server.stop(:test_http_stop_server)
+    end
+
+    test "returns error for non-existent server" do
+      assert {:error, :not_found} = Iso8583.Transport.HTTP.Server.stop(:non_existent_http_server)
+    end
+  end
+
+  describe "stats tracking" do
+    test "initializes stats to zero" do
+      port = get_available_port()
+
+      {:ok, pid} = Iso8583.Transport.HTTP.Server.start_link(
+        port: port,
+        name: :test_http_stats_server
+      )
+
+      # Get state via State process
+      state_pid = Process.whereis(Iso8583.Transport.HTTP.Server.State)
+      assert state_pid != nil
+
+      stats = GenServer.call(state_pid, :get_stats)
+
+      assert stats.connection_time != nil
+      assert is_integer(stats.bytes_sent)
+      assert is_integer(stats.bytes_received)
+      assert is_integer(stats.messages_received)
+
+      Iso8583.Transport.HTTP.Server.stop(:test_http_stats_server)
+      Process.sleep(100)
+    end
+  end
+
+  # Helper function to get an available port
+  defp get_available_port do
+    {:ok, socket} = :gen_tcp.listen(0, [:binary, active: false])
+    {:ok, port} = :inet.port(socket)
+    :gen_tcp.close(socket)
+    port
+  end
+
+  # Helper function to wait for process to shut down
+  defp wait_for_shutdown(pid, timeout) do
+    wait_for_shutdown(pid, System.monotonic_time(:millisecond), timeout)
+  end
+
+  defp wait_for_shutdown(pid, start_time, timeout) do
+    if not Process.alive?(pid) do
+      :ok
+    else
+      if System.monotonic_time(:millisecond) - start_time > timeout do
+        {:error, :timeout}
+      else
+        Process.sleep(10)
+        wait_for_shutdown(pid, start_time, timeout)
+      end
     end
   end
 end
