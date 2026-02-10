@@ -1186,12 +1186,29 @@ defmodule Iso8583.Transport.WebSocket.Client do
 
   ## Usage
 
+  ### Without TPDU
+
       defmodule MyApp.WSClientHandler do
         use Iso8583.Handler,
           processor: MyApp.PaymentProcessor,
           transport: Iso8583.Transport.WebSocket.Client,
           transport_opts: [
             url: "ws://localhost:4000/iso8583/ws"
+          ]
+      end
+
+  ### With TPDU
+
+      defmodule MyApp.WSClientHandler do
+        use Iso8583.Handler,
+          processor: MyApp.PaymentProcessor,
+          transport: Iso8583.Transport.WebSocket.Client,
+          transport_opts: [
+            url: "ws://acquirer.example.com/iso8583/ws",
+            tpdu_enabled: true,
+            tpdu_address_size: 5,
+            tpdu_source_address: <<0, 0, 0, 0, 1>>,
+            tpdu_destination_address: <<0, 0, 0, 0, 2>>
           ]
       end
 
@@ -1205,10 +1222,16 @@ defmodule Iso8583.Transport.WebSocket.Client do
   | `:timeout` | `integer()` | `60000` | Connection timeout (ms) |
   | `:prefix_bytes` | `1 \\| 2 \\| 4` | `2` | Length prefix bytes for framing |
   | `:headers` | `map()` | `%{}` | Additional headers for handshake |
+  | `:tpdu_enabled` | `boolean()` | `false` | Enable TPDU handling |
+  | `:tpdu_address_size` | `integer()` | `5` | TPDU address size in bytes |
+  | `:tpdu_source_address` | `binary()` | `<<0,0,0,0,1>>` | Source address for requests |
+  | `:tpdu_destination_address` | `binary()` | `<<0,0,0,0,2>>` | Destination address for requests |
 
   ## Message Framing
 
   All messages use length-prefix framing (default: 2 bytes).
+
+  ### Without TPDU
 
   **Client to Server:**
   ```
@@ -1224,31 +1247,59 @@ defmodule Iso8583.Transport.WebSocket.Client do
   +--------+--------+--------------------------+
   ```
 
+  ### With TPDU Enabled
+
+  **Client to Server:**
+  ```
+  +--------+--------+--------------+--------------------------+
+  | Len Hi | Len Lo |    TPDU      |     ISO 8583 Message     |
+  +--------+--------+--------------+--------------------------+
+  |<---- 2 bytes --->|<-- 10 bytes ->|<-- Length - 10 ------->|
+  ```
+
+  **Server to Client:**
+  ```
+  +--------+--------+--------------+--------------------------+
+  | Len Hi | Len Lo |    TPDU      |     ISO 8583 Response    |
+  +--------+--------+--------------+--------------------------+
+  ```
+
+  The TPDU source/destination are automatically swapped in responses.
+
   ## Context Metadata
 
   The client populates `Iso8583.Context` with:
   - `transport_ref` - `:client` (atom identifier)
   - `client_id` - `"ws_client"`
   - `peer_address` - Server's host and port
-  - `transport_metadata` - `%{url, connection_time, bytes_sent, bytes_received}`
+  - `transport_metadata` - `%{url, connection_time, bytes_sent, bytes_received, messages_received, tpdu}`
+
+  When TPDU is enabled, the response TPDU is included in `transport_metadata.tpdu`.
+
+  ## Registry
+
+  When a `:name` is provided, the client registers itself in a registry
+  for lookup by name. This allows `set_receive_callback/2` to work with
+  either a PID or a registered name.
 
   ## Example
 
       # Connect to WebSocket server
       {:ok, client} = Iso8583.Transport.WebSocket.Client.start_link(
-        url: "ws://localhost:4000/iso8583/ws"
+        url: "ws://localhost:4000/iso8583/ws",
+        name: :my_ws_client
       )
 
-      # Set callback for incoming messages
-      Iso8583.Transport.WebSocket.Client.set_receive_callback(client, fn
-        data, _context ->
+      # Set callback for incoming messages (by name)
+      Iso8583.Transport.WebSocket.Client.set_receive_callback(:my_ws_client, fn
+        data, context ->
           # Process ISO 8583 response
           IO.inspect("Received: \#{Base.encode16(data)}")
       end)
 
       # Send ISO message (automatically framed with length prefix)
       iso_message = <<0x02, 0x00, 0xB2, 0x20, ...>>
-      Iso8583.Transport.WebSocket.Client.send(:client, iso_message)
+      Iso8583.Transport.WebSocket.Client.send(:my_ws_client, iso_message)
   """
 
   use GenServer
@@ -1257,6 +1308,7 @@ defmodule Iso8583.Transport.WebSocket.Client do
   import Bitwise
 
   alias Iso8583.Context
+  alias Ex_Iso8583.TPDU
 
   defstruct [
     :socket,
@@ -1273,14 +1325,36 @@ defmodule Iso8583.Transport.WebSocket.Client do
     :connection_time,
     :bytes_sent,
     :bytes_received,
+    :messages_received,
+    :tpdu_enabled,
+    :tpdu_address_size,
+    :tpdu_source_address,
+    :tpdu_destination_address,
+    :request_tpdu,
+    :registry_name,
     :buffer
   ]
 
   @doc """
   Starts the WebSocket client transport.
+
+  ## Options
+
+  - `:url` - Required WebSocket URL
+  - `:name` - Registered name for the client
+  - `:reconnect_interval` - Reconnect delay in ms (default: 5000)
+  - `:timeout` - Connection timeout in ms (default: 60_000)
+  - `:prefix_bytes` - Length prefix bytes for framing (default: 2)
+  - `:headers` - Additional headers for handshake (default: %{})
+  - `:tpdu_enabled` - Enable TPDU handling (default: false)
+  - `:tpdu_address_size` - TPDU address size in bytes (default: 5)
+  - `:tpdu_source_address` - Source address for requests (default: <<0,0,0,0,1>>)
+  - `:tpdu_destination_address` - Destination address for requests (default: <<0,0,0,0,2>>)
   """
   def start_link(opts) do
-    GenServer.start_link(__MODULE__, opts)
+    name = Keyword.get(opts, :name)
+    gen_server_opts = if name, do: [name: name], else: []
+    GenServer.start_link(__MODULE__, opts, gen_server_opts)
   end
 
   @doc """
@@ -1297,6 +1371,8 @@ defmodule Iso8583.Transport.WebSocket.Client do
 
   @doc """
   Sends data to the WebSocket server.
+
+  Supports PID or registered name.
   """
   def send(:client, data) do
     GenServer.call(__MODULE__, {:send, data})
@@ -1306,18 +1382,64 @@ defmodule Iso8583.Transport.WebSocket.Client do
     GenServer.call(pid, {:send, data})
   end
 
+  def send(name, data) when is_atom(name) do
+    case lookup_client(name) do
+      {:ok, pid} -> GenServer.call(pid, {:send, data})
+      {:error, _} -> {:error, :not_found}
+    end
+  end
+
   @doc """
   Registers the callback for receiving messages.
+
+  Supports both PID and registered name (atom) for lookup.
   """
   def set_receive_callback(client_pid, callback) when is_pid(client_pid) do
     GenServer.call(client_pid, {:set_callback, callback})
   end
 
+  def set_receive_callback(name, callback) when is_atom(name) do
+    case lookup_client(name) do
+      {:ok, pid} -> GenServer.call(pid, {:set_callback, callback})
+      {:error, _} -> {:error, :not_found}
+    end
+  end
+
+  @doc """
+  Looks up a WebSocket client by registered name.
+  """
+  def lookup_client(name) when is_atom(name) do
+    ensure_registry_started()
+
+    case :ets.lookup(:iso8583_ws_client_registry, name) do
+      [{^name, pid}] when is_pid(pid) -> {:ok, pid}
+      _ -> {:error, :not_found}
+    end
+  end
+
+  defp ensure_registry_started do
+    case :ets.whereis(:iso8583_ws_client_registry) do
+      :undefined ->
+        :ets.new(:iso8583_ws_client_registry, [:set, :named_table, :public])
+      _ref ->
+        :ok
+    end
+  end
+
   @doc """
   Stops the client.
+
+  Supports both PID and registered name (atom) for lookup.
   """
   def stop(client_pid) when is_pid(client_pid) do
     GenServer.stop(client_pid, :normal)
+  end
+
+  def stop(name) when is_atom(name) do
+    case lookup_client(name) do
+      {:ok, pid} -> GenServer.stop(pid, :normal)
+      {:error, _} -> {:error, :not_found}
+    end
   end
 
   # Server Callbacks
@@ -1325,13 +1447,24 @@ defmodule Iso8583.Transport.WebSocket.Client do
   @impl true
   def init(opts) do
     url = Keyword.fetch!(opts, :url)
+    name = Keyword.get(opts, :name)
     reconnect_interval = Keyword.get(opts, :reconnect_interval, 5000)
     timeout = Keyword.get(opts, :timeout, 60_000)
     prefix_bytes = Keyword.get(opts, :prefix_bytes, 2)
     headers = Keyword.get(opts, :headers, %{})
+    tpdu_enabled = Keyword.get(opts, :tpdu_enabled, false)
+    tpdu_address_size = Keyword.get(opts, :tpdu_address_size, 5)
+    tpdu_source = Keyword.get(opts, :tpdu_source_address, <<0, 0, 0, 0, 1>>)
+    tpdu_destination = Keyword.get(opts, :tpdu_destination_address, <<0, 0, 0, 0, 2>>)
 
     # Parse URL
     {scheme, host, port, path} = parse_url(url)
+
+    # Register in client registry if name is provided
+    if name do
+      ensure_registry_started()
+      :ets.insert(:iso8583_ws_client_registry, {name, self()})
+    end
 
     # Try to connect immediately
     :erlang.send(self(), :connect)
@@ -1351,6 +1484,13 @@ defmodule Iso8583.Transport.WebSocket.Client do
        connection_time: nil,
        bytes_sent: 0,
        bytes_received: 0,
+       messages_received: 0,
+       tpdu_enabled: tpdu_enabled,
+       tpdu_address_size: tpdu_address_size,
+       tpdu_source_address: tpdu_source,
+       tpdu_destination_address: tpdu_destination,
+       request_tpdu: nil,
+       registry_name: name,
        buffer: <<>>
      }}
   end
@@ -1392,15 +1532,29 @@ defmodule Iso8583.Transport.WebSocket.Client do
         # Process each received message
         Enum.each(iso_messages, fn data ->
           if state.receive_callback do
-            context = build_context(state)
-            state.receive_callback.(data, context)
+            # Extract TPDU if enabled (store response TPDU for next request)
+            {data_without_tpdu, response_tpdu} = if state.tpdu_enabled do
+              case TPDU.extract(data, state.tpdu_address_size) do
+                {:ok, tpdu, rest} ->
+                  {rest, tpdu}
+                {:error, _} ->
+                  {data, nil}
+              end
+            else
+              {data, nil}
+            end
+
+            context = build_context(state, response_tpdu)
+            state.receive_callback.(data_without_tpdu, context)
           end
         end)
 
         # Re-enable active mode to receive next message
         :inet.setopts(socket, active: :once)
 
-        {:noreply, %{state | buffer: new_buffer, bytes_received: state.bytes_received + total_bytes}}
+        {:noreply, %{state | buffer: new_buffer, bytes_received: state.bytes_received + total_bytes,
+                         messages_received: state.messages_received + length(iso_messages),
+                         request_tpdu: nil}}
 
       {:error, reason} ->
         Logger.error("WebSocket decode error: #{inspect(reason)}")
@@ -1433,8 +1587,19 @@ defmodule Iso8583.Transport.WebSocket.Client do
   @impl true
   def handle_call({:send, data}, _from, state) do
     if state.socket do
+      # Add TPDU if enabled
+      data_with_tpdu = if state.tpdu_enabled do
+        tpdu = %{
+          destination: state.tpdu_destination_address,
+          source: state.tpdu_source_address
+        }
+        TPDU.prepend(data, tpdu, state.tpdu_address_size)
+      else
+        data
+      end
+
       # Frame the data with length prefix
-      framed_data = frame_data(data, state.prefix_bytes)
+      framed_data = frame_data(data_with_tpdu, state.prefix_bytes)
 
       # Wrap in WebSocket binary frame
       ws_frame = encode_websocket_frame(framed_data)
@@ -1446,7 +1611,17 @@ defmodule Iso8583.Transport.WebSocket.Client do
       case :gen_tcp.send(state.socket, ws_frame) do
         :ok ->
           Logger.debug("Sent successfully via :gen_tcp.send")
-          {:reply, :ok, %{state | bytes_sent: state.bytes_sent + byte_size(ws_frame)}}
+          # Store request TPDU for response handling
+          new_request_tpdu = if state.tpdu_enabled do
+            %{
+              destination: state.tpdu_destination_address,
+              source: state.tpdu_source_address
+            }
+          else
+            nil
+          end
+          {:reply, :ok, %{state | bytes_sent: state.bytes_sent + byte_size(ws_frame),
+                             request_tpdu: new_request_tpdu}}
 
         {:error, reason} ->
           Logger.error("Failed to send: #{inspect(reason)}")
@@ -1470,6 +1645,11 @@ defmodule Iso8583.Transport.WebSocket.Client do
       close_frame = <<0x88, 0>>
       :gen_tcp.send(state.socket, close_frame)
       :gen_tcp.close(state.socket)
+    end
+
+    # Remove from registry
+    if state.registry_name do
+      :ets.delete(:iso8583_ws_client_registry, state.registry_name)
     end
 
     :ok
@@ -1826,7 +2006,7 @@ defmodule Iso8583.Transport.WebSocket.Client do
     <<length::big-integer-size(prefix_bytes * 8), data::binary>>
   end
 
-  defp build_context(state) do
+  defp build_context(state, response_tpdu \\ nil) do
     Context.new(
       transport_ref: :client,
       client_id: "ws_client",
@@ -1835,7 +2015,9 @@ defmodule Iso8583.Transport.WebSocket.Client do
         url: state.url,
         connection_time: state.connection_time,
         bytes_sent: state.bytes_sent,
-        bytes_received: state.bytes_received
+        bytes_received: state.bytes_received,
+        messages_received: state.messages_received,
+        tpdu: response_tpdu
       }
     )
   end
