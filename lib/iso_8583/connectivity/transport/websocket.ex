@@ -194,7 +194,9 @@ defmodule Iso8583.Transport.WebSocket.Server do
 
   All messages use length-prefix framing with configurable prefix size (default: 2 bytes).
 
-  ### Client to Server (Request)
+  ### Without TPDU (Default)
+
+  #### Client to Server (Request)
   ```
   +--------+--------+--------------------------+
   | Len Hi | Len Lo |     ISO 8583 Message     |
@@ -202,7 +204,7 @@ defmodule Iso8583.Transport.WebSocket.Server do
   |<---- 2 bytes --->|<-- Length bytes ------->|
   ```
 
-  ### Server to Client (Response)
+  #### Server to Client (Response)
   ```
   +--------+--------+--------------------------+
   | Len Hi | Len Lo |     ISO 8583 Response    |
@@ -210,7 +212,54 @@ defmodule Iso8583.Transport.WebSocket.Server do
   |<---- 2 bytes --->|<-- Length bytes ------->|
   ```
 
+  ### With TPDU Enabled (`tpdu_enabled: true`)
+
+  When TPDU is enabled, the length prefix covers the entire message (TPDU + ISO).
+
+  #### Client to Server (Request)
+  ```
+  +--------+--------+--------------+--------------------------+
+  | Len Hi | Len Lo |    TPDU      |     ISO 8583 Message     |
+  +--------+--------+--------------+--------------------------+
+  |<---- 2 bytes --->|<-- 10 bytes ->|<-- Length - 10 ------->|
+  |<----------- Total message length --------------->|
+  ```
+
+  **Example:** 90-byte message (10-byte TPDU + 80-byte ISO)
+  ```
+  Length: 0x005A (90 bytes)
+  TPDU:   Destination (5 bytes) + Source (5 bytes)
+  ISO:    0200 MTI + fields
+  ```
+
+  #### Server to Client (Response)
+  ```
+  +--------+--------+--------------+--------------------------+
+  | Len Hi | Len Lo |    TPDU      |     ISO 8583 Response    |
+  +--------+--------+--------------+--------------------------+
+  |<---- 2 bytes --->|<- 10 bytes -->|<-- Length - 10 ------->|
+  |<----------- Total message length --------------->|
+  ```
+
+  **TPDU Routing:** The transport automatically swaps source/destination addresses
+  in the response TPDU to route the message back to the sender.
+
+  #### Message Flow with TPDU
+  ```
+  Request:  [Length] [TPDU: Client→Acquirer] [ISO Message]
+                           ↓
+                    Transport strips TPDU
+                           ↓
+                    Application processes ISO
+                           ↓
+                    Transport adds TPDU
+                           ↓
+  Response: [Length] [TPDU: Acquirer→Client] [ISO Response]
+  ```
+
   ## WebSocket Client Example
+
+  ### Without TPDU
 
   JavaScript:
   ```javascript
@@ -249,6 +298,81 @@ defmodule Iso8583.Transport.WebSocket.Server do
   def send_iso_message(ws, iso_data):
       framed = struct.pack('>H', len(iso_data)) + iso_data
       ws.send(framed, websocket.ABNF.OPCODE_BINARY)
+
+  ws = websocket.WebSocketApp("ws://localhost:4000/iso8583/ws",
+                              on_message=on_message)
+  ws.run_forever()
+  ```
+
+  ### With TPDU Enabled
+
+  JavaScript:
+  ```javascript
+  const TPDU_SIZE = 10;  // 5 bytes dest + 5 bytes source
+  const SOURCE_ADDR = new Uint8Array([0, 0, 0, 0, 1]);  // Our address
+
+  function sendMessageWithTPDU(isoMessage, destAddr) {
+    const payloadSize = TPDU_SIZE + isoMessage.length;
+    const framed = new Uint8Array(2 + payloadSize);
+
+    // Length prefix (TPDU + ISO)
+    framed[0] = (payloadSize >> 8) & 0xFF;
+    framed[1] = payloadSize & 0xFF;
+
+    // TPDU: destination + source
+    framed.set(destAddr, 2);           // Bytes 2-6
+    framed.set(SOURCE_ADDR, 7);        // Bytes 7-11
+
+    // ISO message
+    framed.set(isoMessage, 12);        // Bytes 12+
+    ws.send(framed);
+  }
+
+  ws.onmessage = (event) => {
+    const data = new Uint8Array(event.data);
+    const length = (data[0] << 8) | data[1];
+    const message = data.slice(2, 2 + length);
+
+    // Extract TPDU
+    const tpduDest = message.slice(0, 5);
+    const tpduSrc = message.slice(5, 10);
+    const isoMessage = message.slice(10);
+
+    // Process ISO 8583 response
+  };
+  ```
+
+  Python (with TPDU):
+  ```python
+  import websocket
+  import struct
+
+  TPDU_SIZE = 10
+  SOURCE_ADDR = bytes([0, 0, 0, 0, 1])  # Our address
+
+  def send_iso_message_with_tpdu(ws, iso_data, dest_addr):
+      # Calculate total length (TPDU + ISO)
+      total_length = TPDU_SIZE + len(iso_data)
+
+      # Build message: length + TPDU + ISO
+      framed = struct.pack('>H', total_length)  # 2-byte length
+      framed += dest_addr                      # 5 bytes destination
+      framed += SOURCE_ADDR                    # 5 bytes source
+      framed += iso_data                        # ISO message
+
+      ws.send(framed, websocket.ABNF.OPCODE_BINARY)
+
+  def on_message(ws, message):
+      # Extract length
+      length = struct.unpack('>H', message[:2])[0]
+
+      # Extract TPDU and ISO message
+      tpdu_dest = message[2:7]
+      tpdu_src = message[7:12]
+      iso_message = message[12:2+length]
+
+      print(f"From: {tpdu_src.hex()}, To: {tpdu_dest.hex()}")
+      print(f"ISO: {iso_message.hex()}")
 
   ws = websocket.WebSocketApp("ws://localhost:4000/iso8583/ws",
                               on_message=on_message)
@@ -296,13 +420,30 @@ defmodule Iso8583.Transport.WebSocket.Server do
     :certfile,
     :keyfile,
     :prefix_bytes,
-    :receive_callback
+    :receive_callback,
+    :tpdu_enabled,
+    :tpdu_address_size,
+    :tpdu_source_address
   ]
 
   # Client API
 
   @doc """
   Starts the WebSocket server transport.
+
+  ## Options
+
+  - `:port` - Required port number
+  - `:path` - WebSocket path (default: "/iso8583/ws")
+  - `:scheme` - :http or :https (default: :http)
+  - `:timeout` - Connection timeout (default: 60_000)
+  - `:name` - Registered name for the server
+  - `:certfile` - Path to TLS certificate (for :https)
+  - `:keyfile` - Path to TLS private key (for :https)
+  - `:prefix_bytes` - Length prefix size: 1, 2, or 4 bytes (default: 2)
+  - `:tpdu_enabled` - Enable TPDU handling (default: false)
+  - `:tpdu_address_size` - TPDU address size in bytes (default: 5)
+  - `:tpdu_source_address` - Source address for responses (default: <<0,0,0,0,1>>)
   """
   def start_link(opts) do
     port = Keyword.fetch!(opts, :port)
@@ -313,6 +454,9 @@ defmodule Iso8583.Transport.WebSocket.Server do
     certfile = Keyword.get(opts, :certfile)
     keyfile = Keyword.get(opts, :keyfile)
     prefix_bytes = Keyword.get(opts, :prefix_bytes, 2)
+    tpdu_enabled = Keyword.get(opts, :tpdu_enabled, false)
+    tpdu_address_size = Keyword.get(opts, :tpdu_address_size, 5)
+    tpdu_source = Keyword.get(opts, :tpdu_source_address, <<0, 0, 0, 0, 1>>)
 
     Supervisor.start_link(
       __MODULE__,
@@ -324,7 +468,10 @@ defmodule Iso8583.Transport.WebSocket.Server do
         name: name,
         certfile: certfile,
         keyfile: keyfile,
-        prefix_bytes: prefix_bytes
+        prefix_bytes: prefix_bytes,
+        tpdu_enabled: tpdu_enabled,
+        tpdu_address_size: tpdu_address_size,
+        tpdu_source_address: tpdu_source
       ],
       name: name
     )
@@ -391,6 +538,9 @@ defmodule Iso8583.Transport.WebSocket.Server do
     certfile = Keyword.get(opts, :certfile)
     keyfile = Keyword.get(opts, :keyfile)
     prefix_bytes = Keyword.get(opts, :prefix_bytes, 2)
+    tpdu_enabled = Keyword.get(opts, :tpdu_enabled, false)
+    tpdu_address_size = Keyword.get(opts, :tpdu_address_size, 5)
+    tpdu_source = Keyword.get(opts, :tpdu_source_address, <<0, 0, 0, 0, 1>>)
 
     # Start state process to hold callback
     state_name = Module.concat(__MODULE__, State)
@@ -406,6 +556,9 @@ defmodule Iso8583.Transport.WebSocket.Server do
          timeout: timeout,
          registry_name: name,
          prefix_bytes: prefix_bytes,
+         tpdu_enabled: tpdu_enabled,
+         tpdu_address_size: tpdu_address_size,
+         tpdu_source_address: tpdu_source,
          name: state_name
        ]},
       # Plug-based WebSocket endpoint
@@ -432,7 +585,7 @@ defmodule Iso8583.Transport.WebSocket.Server.State do
 
   use GenServer
 
-  defstruct [:callback, :port, :path, :timeout, :registry_name, :prefix_bytes]
+  defstruct [:callback, :port, :path, :timeout, :registry_name, :prefix_bytes, :tpdu_enabled, :tpdu_address_size, :tpdu_source_address]
 
   def start_link(opts) do
     name = Keyword.get(opts, :name)
@@ -445,6 +598,9 @@ defmodule Iso8583.Transport.WebSocket.Server.State do
     timeout = Keyword.get(opts, :timeout, 60_000)
     registry_name = Keyword.get(opts, :registry_name)
     prefix_bytes = Keyword.get(opts, :prefix_bytes, 2)
+    tpdu_enabled = Keyword.get(opts, :tpdu_enabled, false)
+    tpdu_address_size = Keyword.get(opts, :tpdu_address_size, 5)
+    tpdu_source = Keyword.get(opts, :tpdu_source_address, <<0, 0, 0, 0, 1>>)
 
     # Register in registry so we can be found
     if registry_name do
@@ -462,7 +618,10 @@ defmodule Iso8583.Transport.WebSocket.Server.State do
        path: path,
        timeout: timeout,
        registry_name: registry_name,
-       prefix_bytes: prefix_bytes
+       prefix_bytes: prefix_bytes,
+       tpdu_enabled: tpdu_enabled,
+       tpdu_address_size: tpdu_address_size,
+       tpdu_source_address: tpdu_source
      }}
   end
 
@@ -476,6 +635,14 @@ defmodule Iso8583.Transport.WebSocket.Server.State do
 
   def handle_call(:get_prefix_bytes, _from, state) do
     {:reply, state.prefix_bytes, state}
+  end
+
+  def handle_call(:get_tpdu_config, _from, state) do
+    {:reply, %{
+      enabled: state.tpdu_enabled,
+      address_size: state.tpdu_address_size,
+      source_address: state.tpdu_source_address
+    }, state}
   end
 
   def handle_info({:get_callback, from}, state) do
@@ -645,7 +812,7 @@ defmodule Iso8583.Transport.WebSocket.Server.Handler do
 
   # Process the received message through the callback
   defp process_message(data, state) do
-    # Try to get the callback from the state process without blocking
+    # Try to get the callback and prefix_bytes from the state process
     case GenServer.whereis(state.state_name) do
       nil ->
         Logger.warning("State process not found!")
@@ -657,29 +824,62 @@ defmodule Iso8583.Transport.WebSocket.Server.Handler do
         # Wait for response with a timeout
         receive do
           {:callback, callback} when is_function(callback, 2) ->
+            # Get prefix_bytes and TPDU config
+            prefix_bytes = GenServer.call(pid, :get_prefix_bytes, 1000)
+            tpdu_config = GenServer.call(pid, :get_tpdu_config, 1000)
+
+            # Decode length-prefixed framing before passing to callback
+            decoded_data = case Iso8583.Transport.WebSocket.decode_framed(data, prefix_bytes) do
+              {:ok, message, _rest} -> message
+              :incomplete -> data  # No valid framing, use as-is
+            end
+
+            # Extract TPDU if enabled (store original for response)
+            {data_without_tpdu, request_tpdu} = if tpdu_config.enabled do
+              case Ex_Iso8583.TPDU.extract(decoded_data, tpdu_config.address_size) do
+                {:ok, tpdu, rest} ->
+                  {rest, tpdu}
+                {:error, _} ->
+                  {decoded_data, nil}
+              end
+            else
+              {decoded_data, nil}
+            end
+
             # Create context
             context = %{
               peer_address: {127, 0, 0, 1},
               transport_metadata: %{
-                websocket: true
+                websocket: true,
+                tpdu: request_tpdu
               }
             }
 
-            # Call the callback
-            result = callback.(data, context)
-            Logger.info("Callback returned: #{inspect(result)}")
+            # Call the callback with decoded data (without TPDU)
+            result = callback.(data_without_tpdu, context)
 
             # Send response back if callback returns {:reply, response}
             case result do
               {:reply, response} when is_binary(response) and byte_size(response) > 0 ->
-                # Frame the response with 2-byte length prefix (big-endian)
-                response_len = byte_size(response)
-                framed_response = <<response_len::16-big, response::binary>>
-                Logger.info("Sending framed response: #{byte_size(framed_response)} bytes (response_size: #{response_len}) (hex: #{Base.encode16(framed_response)})")
+                # Add TPDU to response if enabled
+                response_with_tpdu = if tpdu_config.enabled and request_tpdu do
+                  # Swap destination and source for response
+                  response_tpdu = %{
+                    destination: request_tpdu.source,
+                    source: tpdu_config.source_address
+                  }
+                  Ex_Iso8583.TPDU.prepend(response, response_tpdu, tpdu_config.address_size)
+                else
+                  response
+                end
+
+                # Frame the response with length prefix (big-endian)
+                response_len = byte_size(response_with_tpdu)
+                framed_response = <<response_len::big-unsigned-size(prefix_bytes * 8), response_with_tpdu::binary>>
                 {:push, [{:binary, framed_response}], state}
 
               {:reply, response} when is_binary(response) ->
-                Logger.warning("Response is empty (size: #{byte_size(response)}), not sending")
+                Logger.debug("Response is empty (size: #{byte_size(response)}), not sending")
                 {:ok, state}
 
               other ->
