@@ -154,6 +154,7 @@ end
 - Type-safe field mapping
 - Mandatory field validation
 - Support for copyable fields (request → response)
+- **Compile-time validation** for always mandatory fields (11, 41, 42)
 
 #### `TransactionTypeGroup` - Transaction Grouping
 
@@ -237,12 +238,27 @@ end
 **Use the processor:**
 
 ```elixir
-# Process raw ISO message
+# Process raw ISO message (returns response struct)
 {:ok, response} = MyProcessor.process(raw_iso_message)
 
 # Process pre-parsed struct
 request = %SaleRequest{amount: 10000, stan: "000123", pan: "...", terminal_id: "TERM001"}
 {:ok, response} = MyProcessor.process_struct(request)
+
+# Process and encode response to binary in one call
+{:ok, response_binary} = MyProcessor.process_and_encode(
+  raw_iso_message,
+  %{},
+  %{bitmap_type: :binary, field_header_type: :bcd},
+  %{2 => "n..19", 3 => "n 6", ...}
+)
+
+# Encode a response struct to binary
+{:ok, binary} = MyProcessor.encode_response(
+  response_struct,
+  %{bitmap_type: :binary, field_header_type: :bcd},
+  %{2 => "n..19", 3 => "n 6", ...}
+)
 ```
 
 **Middleware:**
@@ -276,6 +292,7 @@ end
 - **Middleware pipeline** - Composable cross-cutting concerns
 - **Error handling** - Automatic error response generation
 - **Pure functional** - No processes, no supervision (handled separately)
+- **Response encoding** - `encode_response/3` and `process_and_encode/5` for encoding responses
 
 #### `TransactionProcessor.TimeoutWrapper` - Timeout Handling
 

@@ -67,15 +67,33 @@ defmodule Ex_Iso8583.TransactionType do
       - Suffix wildcard: `"*1000"` matches "001000", "021000", etc.
       - Full wildcard: `"*"` matches all processing codes (default)
 
+  ## Always Mandatory Fields
+
+  The following ISO 8583 fields are **always mandatory** and must be included
+  in every transaction type definition (in either `mandatory` or `optional`):
+  - **Field 11** - STAN (System Trace Audit Number)
+  - **Field 41** - Terminal ID
+  - **Field 42** - Merchant ID
+
+  This validation is enforced at **compile time**. If you forget to include these
+  fields, you will get a compilation error with a helpful message.
+
   ## Examples
       transaction_type "0100" do
-        fields %{pan: 2, amount: 4}
-        mandatory [:pan, :amount]
+        fields %{
+          pan: 2,
+          amount: 4,
+          stan: 11,           # Always mandatory
+          terminal_id: 41,    # Always mandatory
+          merchant_id: 42     # Always mandatory
+        }
+        mandatory [:pan, :amount, :stan, :terminal_id, :merchant_id]
       end
 
       transaction_type "0100", processing_code: "00*" do
-        fields %{pan: 2, amount: 4}
+        fields %{pan: 2, amount: 4, stan: 11, terminal_id: 41, merchant_id: 42}
         mandatory [:pan, :amount]
+        optional [:stan, :terminal_id, :merchant_id]  # Can be optional if populated elsewhere
       end
   """
   # Handle with processing_code option and do block: transaction_type "0100", processing_code: "00*" do
