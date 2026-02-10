@@ -5,6 +5,63 @@ defmodule Iso8583.Transport.TCP do
   Includes both server (accepts connections) and client (connects out)
   implementations.
   """
+
+  @doc """
+  Encodes data with length prefix framing.
+
+  ## Parameters
+  - `data` - Binary data to frame
+  - `prefix_bytes` - Number of bytes for length prefix (1, 2, or 4)
+
+  ## Returns
+  Framed binary with big-endian (network order) length prefix.
+
+  ## Examples
+      iex> Iso8583.Transport.TCP.encode_framed(<<1, 2, 3>>, 2)
+      <<0, 3, 1, 2, 3>>
+
+      iex> Iso8583.Transport.TCP.encode_framed(<<0x02, 0x00>>, 1)
+      <<2, 2, 0>>
+  """
+  def encode_framed(data, prefix_bytes) when prefix_bytes in [1, 2, 4] do
+    length = byte_size(data)
+    <<length::big-integer-size(prefix_bytes * 8), data::binary>>
+  end
+
+  @doc """
+  Decodes length-prefixed data from a buffer.
+
+  ## Parameters
+  - `buffer` - Binary buffer possibly containing length-prefixed data
+  - `prefix_bytes` - Number of bytes for length prefix (1, 2, or 4)
+
+  ## Returns
+  - `{:ok, message, remaining}` - Successfully extracted a message
+  - `:incomplete` - Not enough data for length prefix or complete message
+
+  ## Examples
+      iex> Iso8583.Transport.TCP.decode_framed(<<0, 3, 1, 2, 3, 4, 5>>, 2)
+      {:ok, <<1, 2, 3>>, <<4, 5>>}
+
+      iex> Iso8583.Transport.TCP.decode_framed(<<0, 3>>, 2)
+      :incomplete
+  """
+  def decode_framed(buffer, prefix_bytes) when prefix_bytes in [1, 2, 4] do
+    prefix_size = prefix_bytes
+
+    if byte_size(buffer) < prefix_size do
+      :incomplete
+    else
+      <<msg_length::big-integer-size(prefix_bytes * 8), rest::binary>> = buffer
+
+      if byte_size(rest) >= msg_length do
+        <<message::binary-size(msg_length), remaining::binary>> = rest
+        {:ok, message, remaining}
+      else
+        :incomplete
+      end
+    end
+  end
 end
 
 defmodule Iso8583.Transport.TCP.Server do
@@ -236,7 +293,13 @@ defmodule Iso8583.Transport.TCP.Server do
           │    ├── Acceptor 2 (GenServer) ──► Connection 2
           │    └── ...
           │
-          └── ClientRegistry (ETS)
+          └── ClientRegistry (ETS) - Stores connection stats
+
+  ## Registry
+
+  When a `:name` is provided, the server registers itself in a registry
+  for lookup by name. This allows `set_receive_callback/2` to work with
+  either a PID or a registered name.
   """
 
   use GenServer
@@ -254,6 +317,7 @@ defmodule Iso8583.Transport.TCP.Server do
     :packet_handler,
     :timeout,
     :name,
+    :registry_name,
     :tpdu_enabled,
     :tpdu_address_size,
     :tpdu_source_address
@@ -268,7 +332,7 @@ defmodule Iso8583.Transport.TCP.Server do
 
   - `:port` - Required port number
   - `:acceptors` - Number of acceptor processes (default: 10)
-  - `:name` - Registered name for the server
+  - `:name` - Registered name for the server (also used for Registry)
   - `:packet_handler` - How to parse messages (default: :raw)
   - `:timeout` - Connection timeout in ms (default: 60_000)
   - `:tpdu_enabled` - Enable TPDU handling (default: false)
@@ -285,6 +349,8 @@ defmodule Iso8583.Transport.TCP.Server do
     tpdu_address_size = Keyword.get(opts, :tpdu_address_size, 5)
     tpdu_source = Keyword.get(opts, :tpdu_source_address, <<0, 0, 0, 0, 1>>)
 
+    gen_server_opts = if name, do: [name: name], else: []
+
     GenServer.start_link(
       __MODULE__,
       [
@@ -294,9 +360,10 @@ defmodule Iso8583.Transport.TCP.Server do
         timeout: timeout,
         tpdu_enabled: tpdu_enabled,
         tpdu_address_size: tpdu_address_size,
-        tpdu_source_address: tpdu_source
+        tpdu_source_address: tpdu_source,
+        registry_name: name
       ],
-      name: name
+      gen_server_opts
     )
   end
 
@@ -336,13 +403,39 @@ defmodule Iso8583.Transport.TCP.Server do
 
   @doc """
   Registers the callback for receiving messages.
+
+  Supports both PID and registered name (atom) for lookup.
   """
   def set_receive_callback(server_pid, callback) when is_pid(server_pid) do
     GenServer.call(server_pid, {:set_callback, callback})
   end
 
   def set_receive_callback(name, callback) when is_atom(name) do
-    GenServer.call(name, {:set_callback, callback})
+    case lookup_server(name) do
+      {:ok, pid} -> GenServer.call(pid, {:set_callback, callback})
+      {:error, _} -> {:error, :not_found}
+    end
+  end
+
+  @doc """
+  Looks up a TCP server by registered name.
+  """
+  def lookup_server(name) when is_atom(name) do
+    ensure_registry_started()
+
+    case :ets.lookup(:iso8583_tcp_registry, name) do
+      [{^name, pid}] when is_pid(pid) -> {:ok, pid}
+      _ -> {:error, :not_found}
+    end
+  end
+
+  defp ensure_registry_started do
+    case :ets.whereis(:iso8583_tcp_registry) do
+      :undefined ->
+        :ets.new(:iso8583_tcp_registry, [:set, :named_table, :public])
+      _ref ->
+        :ok
+    end
   end
 
   @doc """
@@ -353,7 +446,10 @@ defmodule Iso8583.Transport.TCP.Server do
   end
 
   def stop(name) when is_atom(name) do
-    GenServer.stop(name, :normal)
+    case lookup_server(name) do
+      {:ok, pid} -> GenServer.stop(pid, :normal)
+      {:error, _} -> {:error, :not_found}
+    end
   end
 
   # Server Callbacks
@@ -367,8 +463,9 @@ defmodule Iso8583.Transport.TCP.Server do
     tpdu_enabled = Keyword.get(opts, :tpdu_enabled, false)
     tpdu_address_size = Keyword.get(opts, :tpdu_address_size, 5)
     tpdu_source = Keyword.get(opts, :tpdu_source_address, <<0, 0, 0, 0, 1>>)
+    registry_name = Keyword.get(opts, :registry_name)
 
-    # Create client registry
+    # Create client registry with connection stats
     client_registry = :ets.new(:tcp_clients, [:set, :private, :named_table])
 
     # Start acceptor supervisor
@@ -380,6 +477,11 @@ defmodule Iso8583.Transport.TCP.Server do
             # Start acceptors
             start_acceptors(acceptor_sup, listen_socket, self(), acceptors, opts)
 
+            # Register in TCP Registry if name is provided
+            if registry_name do
+              :ets.insert(:iso8583_tcp_registry, {registry_name, self()})
+            end
+
             {:ok,
              %__MODULE__{
                listen_socket: listen_socket,
@@ -389,6 +491,8 @@ defmodule Iso8583.Transport.TCP.Server do
                acceptors: acceptors,
                packet_handler: packet_handler,
                timeout: timeout,
+               name: registry_name,
+               registry_name: registry_name,
                tpdu_enabled: tpdu_enabled,
                tpdu_address_size: tpdu_address_size,
                tpdu_source_address: tpdu_source
@@ -411,7 +515,13 @@ defmodule Iso8583.Transport.TCP.Server do
   @impl true
   def handle_info({:incoming_message, client_id, data, peer_address, request_tpdu}, state) do
     if state.receive_callback do
-      socket = :ets.lookup_element(state.client_registry, client_id, 2)
+      # Get socket and update stats
+      [{_client_id, socket, conn_time, bytes_recv, msgs_recv}] = :ets.lookup(state.client_registry, client_id)
+
+      # Update stats
+      new_bytes_recv = bytes_recv + byte_size(data)
+      new_msgs_recv = msgs_recv + 1
+      :ets.insert(state.client_registry, {client_id, socket, conn_time, new_bytes_recv, new_msgs_recv})
 
       context =
         Context.new(
@@ -419,9 +529,9 @@ defmodule Iso8583.Transport.TCP.Server do
           client_id: client_id,
           peer_address: peer_address,
           transport_metadata: %{
-            connection_time: get_connection_time(client_id),
-            bytes_received: get_bytes_received(client_id),
-            messages_received: get_messages_received(client_id),
+            connection_time: conn_time,
+            bytes_received: new_bytes_recv,
+            messages_received: new_msgs_recv,
             tpdu: request_tpdu
           }
         )
@@ -445,7 +555,8 @@ defmodule Iso8583.Transport.TCP.Server do
 
   @impl true
   def handle_call({:register_client, client_id, socket}, _from, state) do
-    :ets.insert(state.client_registry, {client_id, socket})
+    # Register client with connection stats
+    :ets.insert(state.client_registry, {client_id, socket, System.system_time(:millisecond), 0, 0})
     {:reply, :ok, state}
   end
 
@@ -462,6 +573,12 @@ defmodule Iso8583.Transport.TCP.Server do
     end
 
     :ets.delete(state.client_registry)
+
+    # Remove from registry
+    if state.registry_name do
+      :ets.delete(:iso8583_tcp_registry, state.registry_name)
+    end
+
     :ok
   end
 
@@ -495,11 +612,6 @@ defmodule Iso8583.Transport.TCP.Server do
       {:ok, _pid} = DynamicSupervisor.start_child(supervisor, child_spec)
     end)
   end
-
-  # Connection tracking (simplified - in production would use separate table)
-  defp get_connection_time(_client_id), do: System.system_time(:millisecond)
-  defp get_bytes_received(_client_id), do: 0
-  defp get_messages_received(_client_id), do: 0
 end
 
 defmodule Iso8583.Transport.TCP.Acceptor do
