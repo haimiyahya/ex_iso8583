@@ -1026,9 +1026,15 @@ defmodule Iso8583.Transport.TCP.Client do
   - `transport_ref` - `:client` (atom identifier)
   - `client_id` - `"tcp_client"`
   - `peer_address` - Remote server address
-  - `transport_metadata` - `%{connection_time, bytes_sent, bytes_received, tpdu}`
+  - `transport_metadata` - `%{connection_time, bytes_sent, bytes_received, messages_received, tpdu}`
 
   When TPDU is enabled, the response TPDU is included in `transport_metadata.tpdu`.
+
+  ## Registry
+
+  When a `:name` is provided, the client registers itself in a registry
+  for lookup by name. This allows `send/2`, `set_receive_callback/2`, and `stop/2`
+  to work with either a PID or a registered name.
 
   """
 
@@ -1049,6 +1055,8 @@ defmodule Iso8583.Transport.TCP.Client do
     :connection_time,
     :bytes_sent,
     :bytes_received,
+    :messages_received,
+    :registry_name,
     :pending_requests,
     :packet_handler,
     :tpdu_enabled,
@@ -1080,6 +1088,8 @@ defmodule Iso8583.Transport.TCP.Client do
 
   @doc """
   Sends data to the remote server.
+
+  Supports PID or registered name for lookup.
   """
   def send(:client, data) do
     GenServer.call(__MODULE__, {:send, data})
@@ -1089,18 +1099,64 @@ defmodule Iso8583.Transport.TCP.Client do
     GenServer.call(pid, {:send, data})
   end
 
+  def send(name, data) when is_atom(name) do
+    case lookup_client(name) do
+      {:ok, pid} -> GenServer.call(pid, {:send, data})
+      {:error, _} -> {:error, :not_found}
+    end
+  end
+
   @doc """
   Registers the callback for receiving messages.
+
+  Supports both PID and registered name (atom) for lookup.
   """
   def set_receive_callback(client_pid, callback) when is_pid(client_pid) do
     GenServer.call(client_pid, {:set_callback, callback})
   end
 
+  def set_receive_callback(name, callback) when is_atom(name) do
+    case lookup_client(name) do
+      {:ok, pid} -> GenServer.call(pid, {:set_callback, callback})
+      {:error, _} -> {:error, :not_found}
+    end
+  end
+
+  @doc """
+  Looks up a TCP client by registered name.
+  """
+  def lookup_client(name) when is_atom(name) do
+    ensure_registry_started()
+
+    case :ets.lookup(:iso8583_tcp_client_registry, name) do
+      [{^name, pid}] when is_pid(pid) -> {:ok, pid}
+      _ -> {:error, :not_found}
+    end
+  end
+
+  defp ensure_registry_started do
+    case :ets.whereis(:iso8583_tcp_client_registry) do
+      :undefined ->
+        :ets.new(:iso8583_tcp_client_registry, [:set, :named_table, :public])
+      _ref ->
+        :ok
+    end
+  end
+
   @doc """
   Stops the client.
+
+  Supports both PID and registered name (atom) for lookup.
   """
   def stop(client_pid) when is_pid(client_pid) do
     GenServer.stop(client_pid, :normal)
+  end
+
+  def stop(name) when is_atom(name) do
+    case lookup_client(name) do
+      {:ok, pid} -> GenServer.stop(pid, :normal)
+      {:error, _} -> {:error, :not_found}
+    end
   end
 
   # Server Callbacks
@@ -1109,6 +1165,7 @@ defmodule Iso8583.Transport.TCP.Client do
   def init(opts) do
     host = Keyword.fetch!(opts, :host)
     port = Keyword.fetch!(opts, :port)
+    registry_name = Keyword.get(opts, :name)
     reconnect_interval = Keyword.get(opts, :reconnect_interval, 5000)
     timeout = Keyword.get(opts, :timeout, 60_000)
     packet_handler = Keyword.get(opts, :packet_handler, :raw)
@@ -1117,6 +1174,12 @@ defmodule Iso8583.Transport.TCP.Client do
     tpdu_source = Keyword.get(opts, :tpdu_source_address, <<0, 0, 0, 0, 1>>)
     tpdu_destination = Keyword.get(opts, :tpdu_destination_address, <<0, 0, 0, 0, 2>>)
 
+    # Register in client registry if name is provided
+    if registry_name do
+      ensure_registry_started()
+      :ets.insert(:iso8583_tcp_client_registry, {registry_name, self()})
+    end
+
     # Try to connect immediately
     :erlang.send(self(), :connect)
 
@@ -1124,6 +1187,7 @@ defmodule Iso8583.Transport.TCP.Client do
      %__MODULE__{
        host: host,
        port: port,
+       registry_name: registry_name,
        reconnect_interval: reconnect_interval,
        timeout: timeout,
        packet_handler: packet_handler,
@@ -1135,6 +1199,7 @@ defmodule Iso8583.Transport.TCP.Client do
        connection_time: nil,
        bytes_sent: 0,
        bytes_received: 0,
+       messages_received: 0,
        pending_requests: %{},
        request_tpdu: nil,
        buffer: <<>>
@@ -1164,6 +1229,10 @@ defmodule Iso8583.Transport.TCP.Client do
   def handle_info(:receive, state) when state.socket != nil do
     case recv_and_parse(state) do
       {:ok, messages, new_buffer, bytes_received} ->
+        messages_count = length(messages)
+        new_messages_received = state.messages_received + messages_count
+        new_bytes_received = state.bytes_received + bytes_received
+
         # Process each received message
         Enum.each(messages, fn data ->
           if state.receive_callback do
@@ -1187,7 +1256,8 @@ defmodule Iso8583.Transport.TCP.Client do
                 transport_metadata: %{
                   connection_time: state.connection_time,
                   bytes_sent: state.bytes_sent,
-                  bytes_received: state.bytes_received,
+                  bytes_received: new_bytes_received,
+                  messages_received: new_messages_received,
                   tpdu: response_tpdu
                 }
               )
@@ -1198,7 +1268,7 @@ defmodule Iso8583.Transport.TCP.Client do
 
         # Continue receiving
         :erlang.send(self(), :receive)
-        {:noreply, %{state | buffer: new_buffer, bytes_received: state.bytes_received + bytes_received}}
+        {:noreply, %{state | buffer: new_buffer, bytes_received: new_bytes_received, messages_received: new_messages_received}}
 
       {:error, :timeout} ->
         :erlang.send(self(), :receive)
@@ -1260,6 +1330,11 @@ defmodule Iso8583.Transport.TCP.Client do
   def terminate(_reason, state) do
     if state.socket do
       :gen_tcp.close(state.socket)
+    end
+
+    # Remove from registry
+    if state.registry_name do
+      :ets.delete(:iso8583_tcp_client_registry, state.registry_name)
     end
 
     :ok
