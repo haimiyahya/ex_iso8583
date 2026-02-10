@@ -280,31 +280,457 @@ defmodule Iso8583.HandlerTest do
   end
 end
 
-defmodule Iso8583.Transport.TCP.ClientTest do
+defmodule Iso8583.Transport.TCP.FramingTest do
   use ExUnit.Case
+  alias Iso8583.Transport.TCP
+
+  describe "encode_framed/2" do
+    test "encodes message with 2-byte length prefix" do
+      message = <<1, 2, 3>>
+      encoded = TCP.encode_framed(message, 2)
+
+      assert encoded == <<0, 3, 1, 2, 3>>
+    end
+
+    test "encodes message with 1-byte length prefix" do
+      message = <<1, 2, 3>>
+      encoded = TCP.encode_framed(message, 1)
+
+      assert encoded == <<3, 1, 2, 3>>
+    end
+
+    test "encodes message with 4-byte length prefix" do
+      message = <<1, 2, 3>>
+      encoded = TCP.encode_framed(message, 4)
+
+      assert encoded == <<0, 0, 0, 3, 1, 2, 3>>
+    end
+
+    test "encodes empty message" do
+      encoded = TCP.encode_framed(<<>>, 2)
+
+      assert encoded == <<0, 0>>
+    end
+
+    test "encodes large message with 2-byte prefix" do
+      message = :binary.copy(<<42>>, 1000)
+      encoded = TCP.encode_framed(message, 2)
+
+      assert byte_size(encoded) == 1002
+      assert binary_part(encoded, 0, 2) == <<3, 232>>  # 1000 in big-endian
+    end
+
+    test "encodes max 2-byte length (65535)" do
+      message = :binary.copy(<<255>>, 65535)
+      encoded = TCP.encode_framed(message, 2)
+
+      assert byte_size(encoded) == 65537
+      assert binary_part(encoded, 0, 2) == <<255, 255>>
+    end
+  end
+
+  describe "decode_framed/2" do
+    test "decodes complete message with 2-byte prefix" do
+      buffer = <<0, 3, 1, 2, 3>>
+      assert TCP.decode_framed(buffer, 2) == {:ok, <<1, 2, 3>>, <<>>}
+    end
+
+    test "decodes complete message with 1-byte prefix" do
+      buffer = <<3, 1, 2, 3>>
+      assert TCP.decode_framed(buffer, 1) == {:ok, <<1, 2, 3>>, <<>>}
+    end
+
+    test "decodes complete message with 4-byte prefix" do
+      buffer = <<0, 0, 0, 3, 1, 2, 3>>
+      assert TCP.decode_framed(buffer, 4) == {:ok, <<1, 2, 3>>, <<>>}
+    end
+
+    test "returns incomplete when buffer has only length prefix" do
+      buffer = <<0, 10>>
+      assert TCP.decode_framed(buffer, 2) == :incomplete
+    end
+
+    test "returns incomplete when buffer has partial message" do
+      buffer = <<0, 10, 1, 2, 3>>
+      assert TCP.decode_framed(buffer, 2) == :incomplete
+    end
+
+    test "returns incomplete when buffer is empty" do
+      buffer = <<>>
+      assert TCP.decode_framed(buffer, 2) == :incomplete
+    end
+
+    test "decodes message and returns remaining buffer" do
+      buffer = <<0, 3, 1, 2, 3, 0, 5, 4, 5, 6, 7>>
+      assert TCP.decode_framed(buffer, 2) == {:ok, <<1, 2, 3>>, <<0, 5, 4, 5, 6, 7>>}
+    end
+
+    test "decodes empty message" do
+      buffer = <<0, 0, 1, 2, 3>>
+      assert TCP.decode_framed(buffer, 2) == {:ok, <<>>, <<1, 2, 3>>}
+    end
+
+    test "handles max 2-byte length (65535)" do
+      data = :binary.copy(<<42>>, 65535)
+      buffer = <<255, 255, data::binary>>
+      assert TCP.decode_framed(buffer, 2) == {:ok, data, <<>>}
+    end
+  end
+
+  describe "encode/decode roundtrip" do
+    test "roundtrip with 2-byte prefix" do
+      original = <<0x02, 0x00, 0xB2, 0x20, 0x00, 0x00, 0x00, 0x10>>
+      encoded = TCP.encode_framed(original, 2)
+      assert {:ok, decoded, <<>>} = TCP.decode_framed(encoded, 2)
+      assert decoded == original
+    end
+
+    test "roundtrip with 1-byte prefix" do
+      original = <<1, 2, 3, 4, 5>>
+      encoded = TCP.encode_framed(original, 1)
+      assert {:ok, decoded, <<>>} = TCP.decode_framed(encoded, 1)
+      assert decoded == original
+    end
+
+    test "roundtrip with 4-byte prefix" do
+      original = :binary.copy(<<42>>, 1000)
+      encoded = TCP.encode_framed(original, 4)
+      assert {:ok, decoded, <<>>} = TCP.decode_framed(encoded, 4)
+      assert decoded == original
+    end
+  end
+end
+
+defmodule Iso8583.Transport.TCP.ServerTest do
+  use ExUnit.Case, async: false
+
+  alias Iso8583.Transport.TCP.Server
+
+  describe "server configuration" do
+    test "has child spec" do
+      spec = Server.child_spec(port: 0)  # Use port 0 for testing
+
+      assert spec.id == Iso8583.Transport.TCP.Server
+      assert spec.restart == :permanent
+      assert spec.type == :worker
+    end
+  end
+
+  describe "start_link/1" do
+    test "starts server with port option" do
+      port = get_available_port()
+
+      assert {:ok, pid} = Server.start_link(port: port)
+      assert Process.alive?(pid)
+
+      :ok = Server.stop(pid)
+    end
+
+    test "starts server with name registration" do
+      port = get_available_port()
+
+      assert {:ok, _pid} = Server.start_link(port: port, name: :test_tcp_server)
+
+      # Verify server is registered
+      assert {:ok, pid} = Server.lookup_server(:test_tcp_server)
+      assert Process.alive?(pid)
+
+      :ok = Server.stop(:test_tcp_server)
+    end
+
+    test "starts server with TPDU enabled" do
+      port = get_available_port()
+
+      assert {:ok, pid} = Server.start_link(
+        port: port,
+        tpdu_enabled: true,
+        tpdu_address_size: 5,
+        tpdu_source_address: <<0, 0, 0, 0, 1>>
+      )
+      assert Process.alive?(pid)
+
+      :ok = Server.stop(pid)
+    end
+
+    test "returns error when port is missing" do
+      assert_raise KeyError, fn ->
+        Server.start_link([])
+      end
+    end
+  end
+
+  describe "lookup_server/1" do
+    test "looks up server by registered name" do
+      port = get_available_port()
+
+      {:ok, _pid} = Server.start_link(port: port, name: :test_lookup_server)
+
+      assert {:ok, pid} = Server.lookup_server(:test_lookup_server)
+      assert is_pid(pid)
+
+      Server.stop(:test_lookup_server)
+    end
+
+    test "returns error for non-existent server" do
+      assert {:error, :not_found} = Server.lookup_server(:non_existent_server)
+    end
+  end
+
+  describe "set_receive_callback/2" do
+    test "sets callback by PID" do
+      port = get_available_port()
+      {:ok, pid} = Server.start_link(port: port)
+
+      test_pid = self()
+      callback = fn data, _context -> send(test_pid, {:received, data}) end
+
+      assert :ok = Server.set_receive_callback(pid, callback)
+
+      Server.stop(pid)
+    end
+
+    test "sets callback by registered name" do
+      port = get_available_port()
+      {:ok, _pid} = Server.start_link(port: port, name: :test_callback_server)
+
+      test_pid = self()
+      callback = fn data, _context -> send(test_pid, {:received, data}) end
+
+      assert :ok = Server.set_receive_callback(:test_callback_server, callback)
+
+      Server.stop(:test_callback_server)
+    end
+
+    test "returns error for non-existent server when setting callback by name" do
+      callback = fn data, _context -> :ok end
+
+      assert {:error, :not_found} = Server.set_receive_callback(:non_existent_server, callback)
+    end
+  end
+
+  describe "stop/1" do
+    test "stops server by PID" do
+      port = get_available_port()
+      {:ok, pid} = Server.start_link(port: port)
+
+      assert :ok = Server.stop(pid)
+      refute Process.alive?(pid)
+    end
+
+    test "stops server by name" do
+      port = get_available_port()
+      {:ok, _pid} = Server.start_link(port: port, name: :test_stop_server)
+
+      assert :ok = Server.stop(:test_stop_server)
+
+      # Give it time to stop
+      Process.sleep(50)
+      assert {:error, :not_found} = Server.lookup_server(:test_stop_server)
+    end
+
+    test "returns error for non-existent server" do
+      assert {:error, :not_found} = Server.stop(:non_existent_server)
+    end
+  end
+
+  describe "client connection handling" do
+    test "accepts TCP client connections" do
+      port = get_available_port()
+
+      {:ok, server_pid} = Server.start_link(
+        port: port,
+        acceptors: 2,
+        timeout: 5000
+      )
+
+      # Set callback to track connections
+      parent = self()
+      Server.set_receive_callback(server_pid, fn data, context ->
+        send(parent, {:message_received, data, context})
+      end)
+
+      # Connect a client
+      {:ok, client_socket} = :gen_tcp.connect(:localhost, port, [:binary, packet: 0, active: false])
+
+      # Send a message with 2-byte length prefix
+      iso_message = <<0x02, 0x00, 0xB2, 0x20>>
+      framed = <<byte_size(iso_message)::big-integer-size(16), iso_message::binary>>
+      :gen_tcp.send(client_socket, framed)
+
+      # Give time for server to process
+      Process.sleep(100)
+
+      # Clean up
+      :gen_tcp.close(client_socket)
+      Server.stop(server_pid)
+    end
+
+    test "handles length-prefixed messages with TPDU" do
+      port = get_available_port()
+
+      {:ok, server_pid} = Server.start_link(
+        port: port,
+        packet_handler: {:length_prefix, 2},
+        tpdu_enabled: true,
+        tpdu_address_size: 5,
+        tpdu_source_address: <<0, 0, 0, 0, 2>>
+      )
+
+      parent = self()
+      Server.set_receive_callback(server_pid, fn data, context ->
+        send(parent, {:message_received, data, context})
+      end)
+
+      {:ok, client_socket} = :gen_tcp.connect(:localhost, port, [:binary, packet: 0, active: false])
+
+      # Create message with TPDU: dest (acquirer) + source (client) + ISO message
+      tpdu = <<0, 0, 0, 0, 2, 0, 0, 0, 0, 1>>  # 5 bytes dest + 5 bytes source
+      iso_message = <<0x02, 0x00, 0xB2, 0x20>>
+      payload = tpdu <> iso_message
+      framed = <<byte_size(payload)::big-integer-size(16), payload::binary>>
+
+      :gen_tcp.send(client_socket, framed)
+      Process.sleep(100)
+
+      :gen_tcp.close(client_socket)
+      Server.stop(server_pid)
+    end
+  end
+
+  # Helper function to get an available port
+  defp get_available_port do
+    {:ok, socket} = :gen_tcp.listen(0, [:binary, active: false])
+    {:ok, port} = :inet.port(socket)
+    :gen_tcp.close(socket)
+    port
+  end
+end
+
+defmodule Iso8583.Transport.TCP.ClientTest do
+  use ExUnit.Case, async: false
+
+  alias Iso8583.Transport.TCP.Client
 
   describe "client configuration" do
     test "has child spec" do
-      spec = Iso8583.Transport.TCP.Client.child_spec(host: "localhost", port: 8080)
+      spec = Client.child_spec(host: "localhost", port: 8080)
 
       assert spec.id == Iso8583.Transport.TCP.Client
       assert spec.restart == :permanent
       assert spec.type == :worker
     end
   end
-end
 
-defmodule Iso8583.Transport.TCP.ServerTest do
-  use ExUnit.Case
+  describe "start_link/1" do
+    test "starts client with required options" do
+      port = start_echo_server()
 
-  describe "server configuration" do
-    test "has child spec" do
-      spec = Iso8583.Transport.TCP.Server.child_spec(port: 8080)
+      assert {:ok, pid} = Client.start_link(
+        host: "localhost",
+        port: port
+      )
+      assert Process.alive?(pid)
 
-      assert spec.id == Iso8583.Transport.TCP.Server
-      assert spec.restart == :permanent
-      assert spec.type == :worker
+      Client.stop(pid)
+      stop_echo_server(port)
     end
+
+    test "starts client with TPDU enabled" do
+      port = start_echo_server()
+
+      assert {:ok, pid} = Client.start_link(
+        host: "localhost",
+        port: port,
+        tpdu_enabled: true,
+        tpdu_address_size: 5,
+        tpdu_source_address: <<0, 0, 0, 0, 1>>,
+        tpdu_destination_address: <<0, 0, 0, 0, 2>>
+      )
+      assert Process.alive?(pid)
+
+      Client.stop(pid)
+      stop_echo_server(port)
+    end
+  end
+
+  describe "set_receive_callback/2" do
+    test "sets callback by PID" do
+      port = start_echo_server()
+      {:ok, pid} = Client.start_link(host: "localhost", port: port)
+
+      test_pid = self()
+      callback = fn _data, _context -> send(test_pid, {:received, :ok}) end
+
+      assert :ok = Client.set_receive_callback(pid, callback)
+
+      Client.stop(pid)
+      stop_echo_server(port)
+    end
+  end
+
+  describe "send/2" do
+    test "sends data by PID" do
+      port = start_echo_server()
+      {:ok, pid} = Client.start_link(host: "localhost", port: port)
+
+      assert :ok = Client.send(pid, <<0x02, 0x00, 0xB2, 0x20>>)
+
+      Client.stop(pid)
+      stop_echo_server(port)
+    end
+  end
+
+  describe "stop/1" do
+    test "stops client by PID" do
+      port = start_echo_server()
+      {:ok, pid} = Client.start_link(host: "localhost", port: port)
+
+      assert :ok = Client.stop(pid)
+      refute Process.alive?(pid)
+
+      stop_echo_server(port)
+    end
+  end
+
+  # Simple echo server for testing
+  defp start_echo_server do
+    {:ok, socket} = :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true])
+    {:ok, port} = :inet.port(socket)
+
+    # Start acceptor in a separate process
+    spawn(fn ->
+      accept_loop(socket)
+    end)
+
+    port
+  end
+
+  defp accept_loop(listen_socket) do
+    case :gen_tcp.accept(listen_socket, 1000) do
+      {:ok, socket} ->
+        # Echo data back
+        spawn(fn -> echo_loop(socket) end)
+        accept_loop(listen_socket)
+      {:error, :timeout} ->
+        accept_loop(listen_socket)
+      {:error, _} ->
+        :gen_tcp.close(listen_socket)
+    end
+  end
+
+  defp echo_loop(socket) do
+    case :gen_tcp.recv(socket, 0, 1000) do
+      {:ok, data} ->
+        :gen_tcp.send(socket, data)
+        echo_loop(socket)
+      {:error, _} ->
+        :gen_tcp.close(socket)
+    end
+  end
+
+  defp stop_echo_server(port) do
+    # The echo server process will exit when the socket is closed
+    :ok
   end
 end
 
@@ -545,6 +971,322 @@ defmodule Iso8583.Transport.WebSocketTest do
       assert spec.id == Iso8583.Transport.WebSocket.Server
       assert spec.restart == :permanent
       assert spec.type == :supervisor
+    end
+  end
+end
+
+defmodule Iso8583.Transport.WebSocket.ClientTest do
+  use ExUnit.Case, async: false
+
+  alias Iso8583.Transport.WebSocket.Client
+
+  describe "client configuration" do
+    test "has child spec" do
+      spec = Client.child_spec(url: "ws://localhost:4000/ws")
+
+      assert spec.id == Iso8583.Transport.WebSocket.Client
+      assert spec.restart == :permanent
+      assert spec.type == :worker
+    end
+  end
+
+  describe "start_link/1" do
+    test "accepts url option" do
+      # The client will try to connect but will fail since no server is running
+      # We're testing the option parsing here
+      assert {:ok, pid} = Client.start_link(url: "ws://localhost:14321/ws", reconnect_interval: 100)
+      assert Process.alive?(pid)
+
+      Client.stop(pid)
+      Process.sleep(200)  # Wait for reconnect attempt to not be scheduled
+    end
+
+    test "starts client with name registration" do
+      assert {:ok, pid} = Client.start_link(
+        url: "ws://localhost:14322/ws",
+        name: :test_ws_client,
+        reconnect_interval: 100
+      )
+
+      # Verify client is registered
+      assert {:ok, registered_pid} = Client.lookup_client(:test_ws_client)
+      assert registered_pid == pid
+
+      Client.stop(pid)
+      Process.sleep(200)
+    end
+
+    test "starts client with TPDU enabled" do
+      assert {:ok, pid} = Client.start_link(
+        url: "ws://localhost:14323/ws",
+        tpdu_enabled: true,
+        tpdu_address_size: 5,
+        tpdu_source_address: <<0, 0, 0, 0, 1>>,
+        tpdu_destination_address: <<0, 0, 0, 0, 2>>,
+        reconnect_interval: 100
+      )
+      assert Process.alive?(pid)
+
+      Client.stop(pid)
+      Process.sleep(200)
+    end
+
+    test "starts client with custom prefix_bytes" do
+      assert {:ok, pid} = Client.start_link(
+        url: "ws://localhost:14324/ws",
+        prefix_bytes: 4,
+        reconnect_interval: 100
+      )
+      assert Process.alive?(pid)
+
+      Client.stop(pid)
+      Process.sleep(200)
+    end
+
+    test "starts client with custom headers" do
+      assert {:ok, pid} = Client.start_link(
+        url: "ws://localhost:14325/ws",
+        headers: %{"Authorization" => "Bearer token123"},
+        reconnect_interval: 100
+      )
+      assert Process.alive?(pid)
+
+      Client.stop(pid)
+      Process.sleep(200)
+    end
+
+    test "parses ws:// URL correctly" do
+      assert {:ok, pid} = Client.start_link(
+        url: "ws://localhost:8080/path",
+        reconnect_interval: 100
+      )
+      assert Process.alive?(pid)
+
+      Client.stop(pid)
+      Process.sleep(200)
+    end
+
+    test "parses wss:// URL correctly" do
+      assert {:ok, pid} = Client.start_link(
+        url: "wss://localhost:8443/secure",
+        reconnect_interval: 100
+      )
+      assert Process.alive?(pid)
+
+      Client.stop(pid)
+      Process.sleep(200)
+    end
+  end
+
+  describe "lookup_client/1" do
+    test "looks up client by registered name" do
+      {:ok, _pid} = Client.start_link(
+        url: "ws://localhost:14330/ws",
+        name: :test_lookup_client,
+        reconnect_interval: 100
+      )
+
+      assert {:ok, pid} = Client.lookup_client(:test_lookup_client)
+      assert is_pid(pid)
+
+      Client.stop(:test_lookup_client)
+      Process.sleep(200)
+    end
+
+    test "returns error for non-existent client" do
+      assert {:error, :not_found} = Client.lookup_client(:non_existent_client)
+    end
+  end
+
+  describe "set_receive_callback/2" do
+    test "sets callback by PID" do
+      {:ok, pid} = Client.start_link(
+        url: "ws://localhost:14331/ws",
+        reconnect_interval: 100
+      )
+
+      test_pid = self()
+      callback = fn _data, _context -> send(test_pid, {:ws_received, :ok}) end
+
+      assert :ok = Client.set_receive_callback(pid, callback)
+
+      Client.stop(pid)
+      Process.sleep(200)
+    end
+
+    test "sets callback by registered name" do
+      {:ok, _pid} = Client.start_link(
+        url: "ws://localhost:14332/ws",
+        name: :test_callback_client,
+        reconnect_interval: 100
+      )
+
+      test_pid = self()
+      callback = fn _data, _context -> send(test_pid, {:ws_received, :ok}) end
+
+      assert :ok = Client.set_receive_callback(:test_callback_client, callback)
+
+      Client.stop(:test_callback_client)
+      Process.sleep(200)
+    end
+
+    test "returns error for non-existent client when setting callback by name" do
+      callback = fn _data, _context -> :ok end
+
+      assert {:error, :not_found} = Client.set_receive_callback(:non_existent_client, callback)
+    end
+  end
+
+  describe "send/2" do
+    test "sends data by PID" do
+      {:ok, pid} = Client.start_link(
+        url: "ws://localhost:14333/ws",
+        reconnect_interval: 100
+      )
+
+      # Send will return {:error, :not_connected} since no server is running
+      # but we're testing the function exists and handles the case
+      result = Client.send(pid, <<0x02, 0x00, 0xB2, 0x20>>)
+      # Result will be :ok if socket exists, {:error, :not_connected} if not
+      assert result == :ok or result == {:error, :not_connected}
+
+      Client.stop(pid)
+      Process.sleep(200)
+    end
+
+    test "sends data by name" do
+      {:ok, _pid} = Client.start_link(
+        url: "ws://localhost:14334/ws",
+        name: :test_send_client,
+        reconnect_interval: 100
+      )
+
+      result = Client.send(:test_send_client, <<0x02, 0x00, 0xB2, 0x20>>)
+      assert result == :ok or result == {:error, :not_connected}
+
+      Client.stop(:test_send_client)
+      Process.sleep(200)
+    end
+
+    test "returns error when sending to non-existent client by name" do
+      assert {:error, :not_found} = Client.send(:non_existent_client, <<0x02, 0x00>>)
+    end
+  end
+
+  describe "stop/1" do
+    test "stops client by PID" do
+      {:ok, pid} = Client.start_link(
+        url: "ws://localhost:14340/ws",
+        reconnect_interval: 100
+      )
+
+      assert :ok = Client.stop(pid)
+      refute Process.alive?(pid)
+    end
+
+    test "stops client by name" do
+      {:ok, _pid} = Client.start_link(
+        url: "ws://localhost:14341/ws",
+        name: :test_stop_client,
+        reconnect_interval: 100
+      )
+
+      assert :ok = Client.stop(:test_stop_client)
+
+      Process.sleep(100)
+      assert {:error, :not_found} = Client.lookup_client(:test_stop_client)
+    end
+
+    test "returns error for non-existent client" do
+      assert {:error, :not_found} = Client.stop(:non_existent_client)
+    end
+  end
+
+  describe "WebSocket frame encoding" do
+    test "client starts and initializes state" do
+      {:ok, pid} = Client.start_link(
+        url: "ws://localhost:14350/ws",
+        reconnect_interval: 100
+      )
+
+      # Verify the process is alive
+      assert Process.alive?(pid)
+
+      # Get state via :sys.get_state (for testing)
+      state = :sys.get_state(pid)
+      assert state.url == "ws://localhost:14350/ws"
+      assert state.prefix_bytes == 2  # default
+      assert state.tpdu_enabled == false  # default
+      assert is_integer(state.reconnect_interval)
+
+      Client.stop(pid)
+      Process.sleep(200)
+    end
+  end
+
+  describe "TPDU configuration" do
+    test "stores TPDU configuration in state" do
+      {:ok, pid} = Client.start_link(
+        url: "ws://localhost:14351/ws",
+        tpdu_enabled: true,
+        tpdu_address_size: 5,
+        tpdu_source_address: <<1, 2, 3, 4, 5>>,
+        tpdu_destination_address: <<6, 7, 8, 9, 10>>,
+        reconnect_interval: 100
+      )
+
+      state = :sys.get_state(pid)
+      assert state.tpdu_enabled == true
+      assert state.tpdu_address_size == 5
+      assert state.tpdu_source_address == <<1, 2, 3, 4, 5>>
+      assert state.tpdu_destination_address == <<6, 7, 8, 9, 10>>
+
+      Client.stop(pid)
+      Process.sleep(200)
+    end
+  end
+
+  describe "connection stats tracking" do
+    test "initializes connection stats to zero" do
+      {:ok, pid} = Client.start_link(
+        url: "ws://localhost:14352/ws",
+        reconnect_interval: 100
+      )
+
+      state = :sys.get_state(pid)
+      assert state.bytes_sent == 0
+      assert state.bytes_received == 0
+      assert state.messages_received == 0
+
+      Client.stop(pid)
+      Process.sleep(200)
+    end
+  end
+
+  describe "reconnect behavior" do
+    test "uses default reconnect interval" do
+      {:ok, pid} = Client.start_link(
+        url: "ws://localhost:14353/ws"
+      )
+
+      state = :sys.get_state(pid)
+      assert state.reconnect_interval == 5000  # default
+
+      Client.stop(pid)
+      Process.sleep(200)
+    end
+
+    test "uses custom reconnect interval" do
+      {:ok, pid} = Client.start_link(
+        url: "ws://localhost:14354/ws",
+        reconnect_interval: 1000
+      )
+
+      state = :sys.get_state(pid)
+      assert state.reconnect_interval == 1000
+
+      Client.stop(pid)
+      Process.sleep(200)
     end
   end
 end

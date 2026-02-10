@@ -468,7 +468,7 @@ defmodule Iso8583.Transport.TCP.Server do
     # Create client registry with connection stats
     client_registry = :ets.new(:tcp_clients, [:set, :private, :named_table])
 
-    # Start acceptor supervisor
+    # Start acceptor supervisor (unnamed to avoid conflicts)
     case start_acceptor_supervisor() do
       {:ok, acceptor_sup} ->
         # Start listening
@@ -479,6 +479,7 @@ defmodule Iso8583.Transport.TCP.Server do
 
             # Register in TCP Registry if name is provided
             if registry_name do
+              ensure_registry_started()
               :ets.insert(:iso8583_tcp_registry, {registry_name, self()})
             end
 
@@ -499,6 +500,8 @@ defmodule Iso8583.Transport.TCP.Server do
              }}
 
           {:error, reason} ->
+            # Stop acceptor supervisor on listen failure
+            if acceptor_sup, do: GenServer.stop(acceptor_sup, :normal)
             {:stop, reason}
         end
 
@@ -579,14 +582,18 @@ defmodule Iso8583.Transport.TCP.Server do
       :ets.delete(:iso8583_tcp_registry, state.registry_name)
     end
 
+    # Stop the acceptor supervisor (using the stored PID)
+    if state.acceptor_sup && Process.alive?(state.acceptor_sup) do
+      GenServer.stop(state.acceptor_sup, :normal)
+    end
+
     :ok
   end
 
   # Private functions
 
   defp start_acceptor_supervisor do
-    Supervisor.start_link(
-      [{DynamicSupervisor, strategy: :one_for_one, name: Iso8583.TCP.AcceptorSupervisor}],
+    DynamicSupervisor.start_link(
       strategy: :one_for_one
     )
   end
@@ -598,18 +605,17 @@ defmodule Iso8583.Transport.TCP.Server do
     )
   end
 
-  defp start_acceptors(supervisor, listen_socket, server_pid, count, opts) do
+  defp start_acceptors(acceptor_sup_pid, listen_socket, server_pid, count, opts) do
     Enum.each(1..count, fn _ ->
-      args = {listen_socket, server_pid, opts}
-
       child_spec = %{
         id: {Iso8583.Transport.TCP.Acceptor, make_ref()},
-        start: {Iso8583.Transport.TCP.Acceptor, :start_link, [args]},
+        start: {Iso8583.Transport.TCP.Acceptor, :start_link, [{listen_socket, server_pid, opts}]},
         restart: :permanent,
         type: :worker
       }
 
-      {:ok, _pid} = DynamicSupervisor.start_child(supervisor, child_spec)
+      # Use the acceptor supervisor PID
+      {:ok, _pid} = DynamicSupervisor.start_child(acceptor_sup_pid, child_spec)
     end)
   end
 end
@@ -1141,8 +1147,8 @@ defmodule Iso8583.Transport.TCP.Client do
       {:ok, socket} ->
         Logger.info("Connected to #{state.host}:#{state.port}")
 
-        # Start receiving
-        send(self(), :receive)
+        # Start receiving (use Kernel.send to avoid conflict with Client.send/2)
+        Kernel.send(self(), :receive)
 
         {:noreply,
          %{state | socket: socket, connection_time: System.system_time(:millisecond)}}
