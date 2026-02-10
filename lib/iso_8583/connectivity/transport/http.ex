@@ -64,6 +64,8 @@ defmodule Iso8583.Transport.HTTP.Server do
   | `:scheme` | `:http \| :https` | `:http` | HTTP or HTTPS |
   | `:name` | `atom()` | `nil` | Name for registration |
   | `:timeout` | `integer()` | `30000` | Request timeout (ms) |
+  | `:tpdu_enabled` | `boolean()` | `false` | Enable TPDU handling |
+  | `:tpdu_address_size` | `integer()` | `5` | TPDU address size in bytes |
 
   ## Context Metadata
 
@@ -71,11 +73,13 @@ defmodule Iso8583.Transport.HTTP.Server do
   - `transport_ref` - The `Plug.Conn` struct
   - `client_id` - "http_client"
   - `peer_address` - Client's IP address from conn.remote_ip
-  - `transport_metadata` - `%{method, path, headers, request_id}`
+  - `transport_metadata` - `%{method, path, headers, request_id, connection_time, bytes_sent, bytes_received, messages_received, tpdu}`
 
   """
 
   use Supervisor
+
+  alias Ex_Iso8583.TPDU
 
   defstruct [
     :port,
@@ -85,7 +89,9 @@ defmodule Iso8583.Transport.HTTP.Server do
     :name,
     :certfile,
     :keyfile,
-    :receive_callback
+    :receive_callback,
+    :tpdu_enabled,
+    :tpdu_address_size
   ]
 
   # Client API
@@ -101,6 +107,8 @@ defmodule Iso8583.Transport.HTTP.Server do
     name = Keyword.get(opts, :name)
     certfile = Keyword.get(opts, :certfile)
     keyfile = Keyword.get(opts, :keyfile)
+    tpdu_enabled = Keyword.get(opts, :tpdu_enabled, false)
+    tpdu_address_size = Keyword.get(opts, :tpdu_address_size, 5)
 
     Supervisor.start_link(
       __MODULE__,
@@ -111,7 +119,9 @@ defmodule Iso8583.Transport.HTTP.Server do
         timeout: timeout,
         name: name,
         certfile: certfile,
-        keyfile: keyfile
+        keyfile: keyfile,
+        tpdu_enabled: tpdu_enabled,
+        tpdu_address_size: tpdu_address_size
       ],
       name: name
     )
@@ -138,30 +148,43 @@ defmodule Iso8583.Transport.HTTP.Server do
 
   @doc """
   Registers the callback for receiving messages.
+
+  Supports both PID and registered name (atom) for lookup.
   """
   def set_receive_callback(server_pid, callback) when is_pid(server_pid) do
     GenServer.call(server_pid, {:set_callback, callback})
   end
 
   def set_receive_callback(name, callback) when is_atom(name) do
-    # Find the state process via registry
+    case lookup_server(name) do
+      {:ok, pid} -> GenServer.call(pid, {:set_callback, callback})
+      {:error, _} -> {:error, :not_found}
+    end
+  end
+
+  @doc """
+  Looks up an HTTP server by registered name.
+  """
+  def lookup_server(name) when is_atom(name) do
     case Registry.lookup(Iso8583.HTTP.Registry, name) do
-      [{pid, _}] -> GenServer.call(pid, {:set_callback, callback})
-      [] -> {:error, :not_found}
+      [{pid, _}] when is_pid(pid) -> {:ok, pid}
+      _ -> {:error, :not_found}
     end
   end
 
   @doc """
   Stops the server.
+
+  Supports both PID and registered name (atom) for lookup.
   """
   def stop(server_pid) when is_pid(server_pid) do
     Supervisor.stop(server_pid, :normal)
   end
 
   def stop(name) when is_atom(name) do
-    case Process.whereis(name) do
-      nil -> {:error, :not_found}
-      pid -> Supervisor.stop(pid, :normal)
+    case lookup_server(name) do
+      {:ok, pid} -> Supervisor.stop(pid, :normal)
+      {:error, _} -> {:error, :not_found}
     end
   end
 
@@ -176,6 +199,8 @@ defmodule Iso8583.Transport.HTTP.Server do
     name = Keyword.get(opts, :name)
     certfile = Keyword.get(opts, :certfile)
     keyfile = Keyword.get(opts, :keyfile)
+    tpdu_enabled = Keyword.get(opts, :tpdu_enabled, false)
+    tpdu_address_size = Keyword.get(opts, :tpdu_address_size, 5)
 
     # Start state process to hold callback
     state_name = Module.concat(__MODULE__, State)
@@ -190,6 +215,8 @@ defmodule Iso8583.Transport.HTTP.Server do
          path: path,
          timeout: timeout,
          registry_name: name,
+         tpdu_enabled: tpdu_enabled,
+         tpdu_address_size: tpdu_address_size,
          name: state_name
        ]},
       # Plug-based endpoint router
@@ -212,11 +239,28 @@ end
 defmodule Iso8583.Transport.HTTP.Server.State do
   @moduledoc """
   GenServer that holds the receive callback for the HTTP server.
+
+  Tracks connection statistics and TPDU configuration.
   """
 
   use GenServer
+  require Logger
 
-  defstruct [:callback, :port, :path, :timeout, :registry_name]
+  alias Ex_Iso8583.TPDU
+
+  defstruct [
+    :callback,
+    :port,
+    :path,
+    :timeout,
+    :registry_name,
+    :tpdu_enabled,
+    :tpdu_address_size,
+    :connection_time,
+    :bytes_sent,
+    :bytes_received,
+    :messages_received
+  ]
 
   def start_link(opts) do
     name = Keyword.get(opts, :name)
@@ -228,6 +272,8 @@ defmodule Iso8583.Transport.HTTP.Server.State do
     path = Keyword.get(opts, :path, "/iso8583")
     timeout = Keyword.get(opts, :timeout, 30_000)
     registry_name = Keyword.get(opts, :registry_name)
+    tpdu_enabled = Keyword.get(opts, :tpdu_enabled, false)
+    tpdu_address_size = Keyword.get(opts, :tpdu_address_size, 5)
 
     # Register in registry so we can be found
     if registry_name do
@@ -238,7 +284,20 @@ defmodule Iso8583.Transport.HTTP.Server.State do
       end
     end
 
-    {:ok, %__MODULE__{callback: nil, port: port, path: path, timeout: timeout, registry_name: registry_name}}
+    {:ok,
+     %__MODULE__{
+       callback: nil,
+       port: port,
+       path: path,
+       timeout: timeout,
+       registry_name: registry_name,
+       tpdu_enabled: tpdu_enabled,
+       tpdu_address_size: tpdu_address_size,
+       connection_time: System.system_time(:millisecond),
+       bytes_sent: 0,
+       bytes_received: 0,
+       messages_received: 0
+     }}
   end
 
   def handle_call({:set_callback, callback}, _from, state) do
@@ -247,6 +306,29 @@ defmodule Iso8583.Transport.HTTP.Server.State do
 
   def handle_call(:get_callback, _from, state) do
     {:reply, state.callback, state}
+  end
+
+  def handle_call(:get_tpdu_config, _from, state) do
+    {:reply, {state.tpdu_enabled, state.tpdu_address_size}, state}
+  end
+
+  def handle_call(:get_stats, _from, state) do
+    stats = %{
+      connection_time: state.connection_time,
+      bytes_sent: state.bytes_sent,
+      bytes_received: state.bytes_received,
+      messages_received: state.messages_received
+    }
+    {:reply, stats, state}
+  end
+
+  def handle_call({:update_stats, bytes_sent, bytes_received, message_count}, _from, state) do
+    new_state = %{state |
+      bytes_sent: state.bytes_sent + bytes_sent,
+      bytes_received: state.bytes_received + bytes_received,
+      messages_received: state.messages_received + message_count
+    }
+    {:reply, :ok, new_state}
   end
 
   def handle_info(:register, state) do
@@ -327,11 +409,15 @@ end
 defmodule Iso8583.Transport.HTTP.Server.Plug do
   @moduledoc """
   Plug that handles HTTP requests for ISO 8583 messages.
+
+  Supports TPDU extraction and tracks connection statistics.
   """
 
   import Plug.Conn
 
   require Logger
+
+  alias Ex_Iso8583.TPDU
 
   def init(opts) do
     state_name = Keyword.fetch!(opts, :state_name)
@@ -350,23 +436,36 @@ defmodule Iso8583.Transport.HTTP.Server.Plug do
   end
 
   defp handle_iso_request(conn, state_name) do
+    # Get state configuration (TPDU enabled, etc)
+    {tpdu_enabled, tpdu_address_size} = get_tpdu_config(state_name)
+    {stats, _} = get_stats(state_name)
+
     case read_full_body(conn, "") do
       {:ok, body, conn} ->
-        case parse_request(body) do
-          {:ok, iso_message, request_id} ->
+        bytes_received = byte_size(body)
+
+        case parse_request(body, tpdu_enabled, tpdu_address_size) do
+          {:ok, iso_message, request_id, request_tpdu} ->
             # Get callback
             case get_callback(state_name) do
               nil ->
                 error_response(conn, 503, "Service not ready", request_id)
 
               callback ->
-                # Build context
-                context = build_context(conn, request_id)
+                # Build context with TPDU and stats
+                context = build_context(conn, request_id, stats, request_tpdu)
 
                 # Call processor
                 case callback.(iso_message, context) do
                   {:ok, response} ->
-                    success_response(conn, response, request_id)
+                    # Encode response with TPDU if enabled
+                    response_data = encode_response(response, request_tpdu, tpdu_enabled, tpdu_address_size)
+                    bytes_sent = byte_size(Jason.encode!(%{iso_message: Base.encode64(response_data)}))
+
+                    # Update stats
+                    update_stats(state_name, bytes_sent, bytes_received, 1)
+
+                    success_response(conn, response_data, request_id)
 
                   {:error, reason} ->
                     error_response(conn, 500, inspect(reason), request_id)
@@ -393,13 +492,26 @@ defmodule Iso8583.Transport.HTTP.Server.Plug do
     end
   end
 
-  defp parse_request(body) do
+  defp parse_request(body, tpdu_enabled, tpdu_address_size) do
     case Jason.decode(body) do
       {:ok, %{"iso_message" => encoded_msg} = data} ->
         case Base.decode64(encoded_msg) do
-          {:ok, iso_message} ->
+          {:ok, raw_message} ->
+            # Extract TPDU if enabled
+            {iso_message, request_tpdu} = if tpdu_enabled do
+              case TPDU.extract(raw_message, tpdu_address_size) do
+                {:ok, tpdu, rest} ->
+                  {rest, tpdu}
+                {:error, _} ->
+                  # TPDU extraction failed, use raw message
+                  {raw_message, nil}
+              end
+            else
+              {raw_message, nil}
+            end
+
             request_id = Map.get(data, "request_id")
-            {:ok, iso_message, request_id}
+            {:ok, iso_message, request_id, request_tpdu}
 
           :error ->
             {:error, "Invalid base64 encoding"}
@@ -413,6 +525,19 @@ defmodule Iso8583.Transport.HTTP.Server.Plug do
     end
   end
 
+  defp encode_response(response, request_tpdu, tpdu_enabled, tpdu_address_size) do
+    if tpdu_enabled and request_tpdu do
+      # Swap source/destination for response
+      response_tpdu = %{
+        destination: request_tpdu.source,
+        source: request_tpdu.destination
+      }
+      TPDU.prepend(response, response_tpdu, tpdu_address_size)
+    else
+      response
+    end
+  end
+
   defp get_callback(state_name) do
     case GenServer.call(state_name, :get_callback) do
       nil -> nil
@@ -422,7 +547,31 @@ defmodule Iso8583.Transport.HTTP.Server.Plug do
     _ -> nil
   end
 
-  defp build_context(conn, request_id) do
+  defp get_tpdu_config(state_name) do
+    case GenServer.call(state_name, :get_tpdu_config) do
+      {enabled, size} when is_boolean(enabled) and is_integer(size) -> {enabled, size}
+      _ -> {false, 5}
+    end
+  rescue
+    _ -> {false, 5}
+  end
+
+  defp get_stats(state_name) do
+    case GenServer.call(state_name, :get_stats) do
+      stats when is_map(stats) -> {stats, :ok}
+      _ -> {%{}, :error}
+    end
+  rescue
+    _ -> {%{}, :error}
+  end
+
+  defp update_stats(state_name, bytes_sent, bytes_received, message_count) do
+    GenServer.call(state_name, {:update_stats, bytes_sent, bytes_received, message_count})
+  rescue
+    _ -> :ok
+  end
+
+  defp build_context(conn, request_id, stats, request_tpdu) do
     Iso8583.Context.new(
       transport_ref: conn,
       client_id: "http_client",
@@ -433,7 +582,12 @@ defmodule Iso8583.Transport.HTTP.Server.Plug do
         path: conn.request_path,
         headers: Enum.into(conn.req_headers, %{}),
         user_agent: get_req_header(conn, "user-agent") |> List.first(),
-        content_type: get_req_header(conn, "content-type") |> List.first()
+        content_type: get_req_header(conn, "content-type") |> List.first(),
+        connection_time: Map.get(stats, :connection_time),
+        bytes_sent: Map.get(stats, :bytes_sent, 0),
+        bytes_received: Map.get(stats, :bytes_received, 0) + byte_size(conn.assigns[:body] || ""),
+        messages_received: Map.get(stats, :messages_received, 0) + 1,
+        tpdu: request_tpdu
       }
     )
   end
@@ -533,7 +687,7 @@ defmodule Iso8583.Transport.HTTP.Client do
   - `transport_ref` - `:client` (atom identifier)
   - `client_id` - `"http_client"`
   - `peer_address` - Server's host
-  - `transport_metadata` - `%{url, request_id, bytes_sent, bytes_received}`
+  - `transport_metadata` - `%{url, request_id, bytes_sent, bytes_received, messages_received}`
 
   ## Example
 
@@ -571,7 +725,8 @@ defmodule Iso8583.Transport.HTTP.Client do
     :prefix_bytes,
     :headers,
     :bytes_sent,
-    :bytes_received
+    :bytes_received,
+    :messages_received
   ]
 
   @doc """
@@ -641,7 +796,8 @@ defmodule Iso8583.Transport.HTTP.Client do
        prefix_bytes: prefix_bytes,
        headers: headers,
        bytes_sent: 0,
-       bytes_received: 0
+       bytes_received: 0,
+       messages_received: 0
      }}
   end
 
@@ -683,7 +839,8 @@ defmodule Iso8583.Transport.HTTP.Client do
                 end
 
                 {:reply, :ok, %{state | bytes_sent: state.bytes_sent + byte_size(request_body),
-                  bytes_received: state.bytes_received + byte_size(body)}}
+                  bytes_received: state.bytes_received + byte_size(body),
+                  messages_received: state.messages_received + 1}}
 
               {:error, reason} ->
                 {:reply, {:error, reason}, state}
@@ -796,7 +953,8 @@ defmodule Iso8583.Transport.HTTP.Client do
       transport_metadata: %{
         url: state.url,
         bytes_sent: state.bytes_sent,
-        bytes_received: state.bytes_received
+        bytes_received: state.bytes_received,
+        messages_received: state.messages_received
       }
     )
   end
