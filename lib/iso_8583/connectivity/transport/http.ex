@@ -693,6 +693,21 @@ defmodule Iso8583.Transport.HTTP.Client do
   - `peer_address` - Server's host
   - `transport_metadata` - `%{url, request_id, bytes_sent, bytes_received, messages_received}`
 
+  ## Registry
+
+  When a `:name` is provided, the client registers itself in the registry
+  for lookup by name. This allows `send/2`, `set_receive_callback/2`, and `stop/2`
+  to work with either a PID or a registered name.
+
+      # Start with name
+      {:ok, client} = Iso8583.Transport.HTTP.Client.start_link(
+        url: "http://localhost:4000/iso8583",
+        name: :my_http_client
+      )
+
+      # Use by name
+      Iso8583.Transport.HTTP.Client.send(:my_http_client, iso_message)
+
   ## Example
 
       # Connect to HTTP server
@@ -730,7 +745,8 @@ defmodule Iso8583.Transport.HTTP.Client do
     :headers,
     :bytes_sent,
     :bytes_received,
-    :messages_received
+    :messages_received,
+    :registry_name
   ]
 
   @doc """
@@ -754,6 +770,8 @@ defmodule Iso8583.Transport.HTTP.Client do
 
   @doc """
   Sends data to the HTTP server.
+
+  Supports PID or registered name for lookup.
   """
   def send(:client, data) do
     GenServer.call(__MODULE__, {:send, data})
@@ -763,18 +781,57 @@ defmodule Iso8583.Transport.HTTP.Client do
     GenServer.call(pid, {:send, data})
   end
 
+  def send(name, data) when is_atom(name) do
+    case lookup_client(name) do
+      {:ok, pid} -> GenServer.call(pid, {:send, data})
+      {:error, _} -> {:error, :not_found}
+    end
+  end
+
   @doc """
   Registers the callback for receiving messages.
+
+  Supports both PID and registered name (atom) for lookup.
   """
   def set_receive_callback(client_pid, callback) when is_pid(client_pid) do
     GenServer.call(client_pid, {:set_callback, callback})
   end
 
+  def set_receive_callback(name, callback) when is_atom(name) do
+    case lookup_client(name) do
+      {:ok, pid} -> GenServer.call(pid, {:set_callback, callback})
+      {:error, _} -> {:error, :not_found}
+    end
+  end
+
+  @doc """
+  Looks up an HTTP client by registered name.
+  """
+  def lookup_client(name) when is_atom(name) do
+    try do
+      case Registry.lookup(Iso8583.HTTP.Registry, name) do
+        [{pid, _}] when is_pid(pid) -> {:ok, pid}
+        _ -> {:error, :not_found}
+      end
+    rescue
+      ArgumentError -> {:error, :not_found}
+    end
+  end
+
   @doc """
   Stops the client.
+
+  Supports both PID and registered name (atom) for lookup.
   """
   def stop(client_pid) when is_pid(client_pid) do
     GenServer.stop(client_pid, :normal)
+  end
+
+  def stop(name) when is_atom(name) do
+    case lookup_client(name) do
+      {:ok, pid} -> GenServer.stop(pid, :normal)
+      {:error, _} -> {:error, :not_found}
+    end
   end
 
   # Server Callbacks
@@ -782,9 +839,16 @@ defmodule Iso8583.Transport.HTTP.Client do
   @impl true
   def init(opts) do
     url = Keyword.fetch!(opts, :url)
+    registry_name = Keyword.get(opts, :name)
     timeout = Keyword.get(opts, :timeout, 30_000)
     prefix_bytes = Keyword.get(opts, :prefix_bytes, 2)
     headers = Keyword.get(opts, :headers, %{})
+
+    # Register in HTTP registry if name is provided
+    if registry_name do
+      ensure_registry_started()
+      Registry.register(Iso8583.HTTP.Registry, registry_name, nil)
+    end
 
     # Parse URL
     {scheme, host, port, path} = parse_url(url)
@@ -796,6 +860,7 @@ defmodule Iso8583.Transport.HTTP.Client do
        host: host,
        port: port,
        path: path,
+       registry_name: registry_name,
        timeout: timeout,
        prefix_bytes: prefix_bytes,
        headers: headers,
@@ -873,6 +938,17 @@ defmodule Iso8583.Transport.HTTP.Client do
   end
 
   # Private functions
+
+  defp ensure_registry_started do
+    case Process.whereis(Iso8583.HTTP.Registry) do
+      nil ->
+        # Start the registry
+        {:ok, _pid} = Registry.start_link(keys: :unique, name: Iso8583.HTTP.Registry)
+        :ok
+      _pid ->
+        :ok
+    end
+  end
 
   defp parse_url(url) do
     uri = URI.parse(url)

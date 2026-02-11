@@ -506,9 +506,13 @@ defmodule Iso8583.Transport.WebSocket.Server do
   end
 
   def set_receive_callback(name, callback) when is_atom(name) do
-    case Registry.lookup(Iso8583.WebSocket.Registry, name) do
-      [{pid, _}] -> GenServer.call(pid, {:set_callback, callback})
-      [] -> {:error, :not_found}
+    try do
+      case Registry.lookup(Iso8583.WebSocket.Registry, name) do
+        [{pid, _}] -> GenServer.call(pid, {:set_callback, callback})
+        [] -> {:error, :not_found}
+      end
+    rescue
+      ArgumentError -> {:error, :not_found}
     end
   end
 
@@ -523,6 +527,20 @@ defmodule Iso8583.Transport.WebSocket.Server do
     case Process.whereis(name) do
       nil -> {:error, :not_found}
       pid -> Supervisor.stop(pid, :normal)
+    end
+  end
+
+  @doc """
+  Looks up a WebSocket server by registered name.
+  """
+  def lookup_server(name) when is_atom(name) do
+    try do
+      case Registry.lookup(Iso8583.WebSocket.Registry, name) do
+        [{pid, _}] when is_pid(pid) -> {:ok, pid}
+        _ -> {:error, :not_found}
+      end
+    rescue
+      ArgumentError -> {:error, :not_found}
     end
   end
 

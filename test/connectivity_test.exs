@@ -1043,6 +1043,218 @@ defmodule Iso8583.Transport.HTTP.ServerTest do
   end
 end
 
+defmodule Iso8583.Transport.HTTP.ClientTest do
+  use ExUnit.Case
+
+  alias Iso8583.Transport.HTTP.Client
+
+  describe "client configuration" do
+    test "has child spec" do
+      spec = Client.child_spec(url: "http://localhost:4000/iso8583")
+
+      assert spec.id == Iso8583.Transport.HTTP.Client
+      assert spec.restart == :permanent
+      assert spec.type == :worker
+    end
+  end
+
+  describe "start_link/1" do
+    test "starts client with name registration" do
+      {:ok, pid} = Client.start_link(
+        url: "http://localhost:14000/iso8583",
+        name: :test_http_client
+      )
+
+      assert Process.alive?(pid)
+      Client.stop(:test_http_client)
+    end
+  end
+
+  describe "lookup_client/1" do
+    test "looks up client by registered name" do
+      {:ok, pid} = Client.start_link(
+        url: "http://localhost:14001/iso8583",
+        name: :test_http_lookup_client
+      )
+
+      assert {:ok, lookup_pid} = Client.lookup_client(:test_http_lookup_client)
+      assert lookup_pid == pid
+
+      Client.stop(:test_http_lookup_client)
+    end
+
+    test "returns error for non-existent client" do
+      assert {:error, :not_found} = Client.lookup_client(:non_existent_http_client)
+    end
+  end
+
+  describe "set_receive_callback/2" do
+    test "sets callback by PID" do
+      {:ok, pid} = Client.start_link(
+        url: "http://localhost:14002/iso8583"
+      )
+
+      test_pid = self()
+      callback = fn _data, _context -> send(test_pid, {:http_received, :ok}) end
+
+      assert :ok = Client.set_receive_callback(pid, callback)
+
+      Client.stop(pid)
+    end
+
+    test "sets callback by registered name" do
+      {:ok, _pid} = Client.start_link(
+        url: "http://localhost:14003/iso8583",
+        name: :test_http_callback_client
+      )
+
+      test_pid = self()
+      callback = fn _data, _context -> send(test_pid, {:http_received, :ok}) end
+
+      assert :ok = Client.set_receive_callback(:test_http_callback_client, callback)
+
+      Client.stop(:test_http_callback_client)
+    end
+
+    test "returns error for non-existent client when setting callback by name" do
+      callback = fn _data, _context -> :ok end
+
+      assert {:error, :not_found} = Client.set_receive_callback(:non_existent_http_client, callback)
+    end
+  end
+
+  describe "stop/1" do
+    test "stops client by PID" do
+      {:ok, pid} = Client.start_link(
+        url: "http://localhost:14004/iso8583"
+      )
+
+      assert :ok = Client.stop(pid)
+      refute Process.alive?(pid)
+    end
+
+    test "stops client by name" do
+      {:ok, pid} = Client.start_link(
+        url: "http://localhost:14005/iso8583",
+        name: :test_http_stop_client
+      )
+
+      assert :ok = Client.stop(:test_http_stop_client)
+      refute Process.alive?(pid)
+    end
+
+    test "returns error for non-existent client" do
+      assert {:error, :not_found} = Client.stop(:non_existent_http_client)
+    end
+  end
+
+  describe "connection stats tracking" do
+    test "initializes connection stats to zero" do
+      {:ok, pid} = Client.start_link(
+        url: "http://localhost:14006/iso8583"
+      )
+
+      state = :sys.get_state(pid)
+      assert state.bytes_sent == 0
+      assert state.bytes_received == 0
+      assert state.messages_received == 0
+
+      Client.stop(pid)
+    end
+  end
+end
+
+defmodule Iso8583.Transport.WebSocket.ServerTest do
+  use ExUnit.Case, async: false
+
+  alias Iso8583.Transport.WebSocket.Server
+
+  describe "server configuration" do
+    test "has child spec" do
+      spec = Server.child_spec(port: 4000)
+
+      assert spec.id == Iso8583.Transport.WebSocket.Server
+      assert spec.restart == :permanent
+      assert spec.type == :supervisor
+    end
+  end
+
+  describe "lookup_server/1" do
+    test "looks up server by registered name" do
+      port = get_available_port()
+
+      {:ok, _pid} = Server.start_link(
+        port: port,
+        name: :test_ws_lookup_server
+      )
+
+      assert {:ok, server_pid} = Server.lookup_server(:test_ws_lookup_server)
+      assert is_pid(server_pid)
+
+      Server.stop(:test_ws_lookup_server)
+      Process.sleep(100)
+    end
+
+    test "returns error for non-existent server" do
+      assert {:error, :not_found} = Server.lookup_server(:non_existent_ws_server)
+    end
+  end
+
+  describe "set_receive_callback/2" do
+    test "sets callback by registered name" do
+      port = get_available_port()
+
+      {:ok, _pid} = Server.start_link(
+        port: port,
+        name: :test_ws_callback_server
+      )
+
+      test_pid = self()
+      callback = fn _data, _context -> send(test_pid, {:ws_received, :ok}) end
+
+      assert :ok = Server.set_receive_callback(:test_ws_callback_server, callback)
+
+      Server.stop(:test_ws_callback_server)
+      Process.sleep(100)
+    end
+
+    test "returns error for non-existent server when setting callback by name" do
+      callback = fn _data, _context -> :ok end
+
+      assert {:error, :not_found} = Server.set_receive_callback(:non_existent_ws_server, callback)
+    end
+  end
+
+  describe "stop/2" do
+    test "stops server by name" do
+      port = get_available_port()
+
+      {:ok, pid} = Server.start_link(
+        port: port,
+        name: :test_ws_stop_server
+      )
+
+      # Verify server is running
+      assert {:ok, _registered_pid} = Server.lookup_server(:test_ws_stop_server)
+
+      # Stop the server
+      assert :ok = Server.stop(:test_ws_stop_server)
+    end
+
+    test "returns error for non-existent server" do
+      assert {:error, :not_found} = Server.stop(:non_existent_ws_server)
+    end
+  end
+
+  # Helper function to get an available port
+  defp get_available_port do
+    {:ok, socket} = :gen_tcp.listen(0, [:binary, active: false])
+    {:ok, port} = :inet.port(socket)
+    :gen_tcp.close(socket)
+    port
+  end
+end
+
 defmodule Iso8583.Transport.WebSocketTest do
   use ExUnit.Case
 
