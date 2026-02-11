@@ -160,6 +160,7 @@ defmodule Ex_Iso8583.TransactionType do
       @field_mapping unquote(Macro.escape(fields))
       @mandatory_fields unquote(Macro.escape(mandatory))
       @optional_fields unquote(Macro.escape(optional))
+      @field_formats unquote(Macro.escape(build_field_formats_from_fields(fields)))
 
       @doc """
       Returns the MTI for this transaction type.
@@ -182,6 +183,11 @@ defmodule Ex_Iso8583.TransactionType do
       Returns the field mapping (struct fields to ISO field numbers).
       """
       def field_mapping, do: @field_mapping
+
+      @doc """
+      Returns the field formats map (ISO field numbers to format strings).
+      """
+      def field_formats, do: @field_formats
 
       @doc """
       Returns mandatory field names.
@@ -300,6 +306,17 @@ defmodule Ex_Iso8583.TransactionType do
 
   defp macro_escape(nil), do: nil
   defp macro_escape(term), do: Macro.escape(term)
+
+  # Build field formats map from fields map
+  # Converts %{field_name => {field_num, format}} to %{field_num => format}
+  # Also handles legacy format: %{field_name => field_num}
+  defp build_field_formats_from_fields(fields) when is_map(fields) do
+    Enum.map(fields, fn
+      {_field_name, {field_num, format}} -> {field_num, format}
+      {_field_name, field_num} when is_integer(field_num) -> {field_num, nil}
+    end)
+    |> Map.new()
+  end
 
   # Always mandatory ISO 8583 fields (critical for transaction processing)
   # Field numbers: 11 = STAN, 41 = Terminal ID, 42 = Merchant ID
