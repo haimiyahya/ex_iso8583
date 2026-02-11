@@ -1064,7 +1064,10 @@ defmodule Iso8583.Transport.TCP.Client do
     :tpdu_source_address,
     :tpdu_destination_address,
     :request_tpdu,
-    :buffer
+    :buffer,
+    :correlation_fields,
+    :correlation_field_formats,
+    :correlation_msg_type
   ]
 
   @doc """
@@ -1159,6 +1162,99 @@ defmodule Iso8583.Transport.TCP.Client do
     end
   end
 
+  @doc """
+  Sends an ISO 8583 message and waits for the correlated response.
+
+  This function uses field-based correlation to match responses to requests.
+  By default, it correlates on fields 11 (STAN), 41 (TID), and 42 (MID).
+
+  ## Parameters
+
+  - `client` - PID or registered name of the TCP client
+  - `request` - ISO 8583 request binary (with MTI)
+  - `opts` - Optional keyword list:
+    - `:timeout` - Response timeout in milliseconds (default: 30000)
+    - `:correlation_fields` - Override default correlation fields for this request
+
+  ## Returns
+
+  - `{:ok, response_binary}` - Received matching response
+  - `{:error, :not_connected}` - TCP is not connected
+  - `{:error, {:parse_failed, reason}}` - Failed to parse ISO message for correlation
+  - `{:error, :timeout}` - No response received within timeout
+
+  ## Examples
+
+      # Using default correlation (fields 11, 41, 42)
+      {:ok, response} = Iso8583.Transport.TCP.Client.send_and_wait(
+        :my_client,
+        <<0x02, 0x00, 0xB2, 0x20, ...>>
+      )
+
+  ## Configuration
+
+  To enable correlation, configure the client with:
+
+      {:ok, _client} = Iso8583.Transport.TCP.Client.start_link(
+        host: "localhost",
+        port: 8080,
+        packet_handler: {:length_prefix, 2},
+        correlation_fields: [11, 41, 42],
+        correlation_field_formats: %{
+          11 => "n 6",   # STAN
+          41 => "ans 8", # TID
+          42 => "ans 15" # MID
+        }
+      )
+  """
+  def send_and_wait(client, request, opts \\ []) do
+    timeout = Keyword.get(opts, :timeout, 30000)
+    correlation_fields_override = Keyword.get(opts, :correlation_fields)
+
+    case client do
+      pid when is_pid(pid) ->
+        GenServer.call(pid, {:send_and_wait, request, correlation_fields_override}, timeout)
+
+      name when is_atom(name) ->
+        case lookup_client(name) do
+          {:ok, pid} -> GenServer.call(pid, {:send_and_wait, request, correlation_fields_override}, timeout)
+          {:error, _} -> {:error, :not_found}
+        end
+    end
+  end
+
+  @doc """
+  Extracts the correlation key from an ISO 8583 binary message.
+
+  The key is a tuple of field values in the order of correlation_fields.
+  """
+  def extract_correlation_key(iso_binary, correlation_fields, field_formats, msg_type) do
+    try do
+      {_mti, msg_without_mti} = extract_mti(iso_binary)
+
+      fields = Ex_Iso8583.extract_iso_msg(msg_without_mti, msg_type, field_formats)
+
+      key = correlation_fields
+      |> Enum.map(fn field_num ->
+        value = Map.get(fields, field_num)
+        {field_num, value}
+      end)
+      |> List.to_tuple()
+
+      {:ok, key}
+    rescue
+      e -> {:error, {:parse_failed, Exception.message(e)}}
+    end
+  end
+
+  @doc """
+  Extracts MTI (Message Type Indicator) from an ISO 8583 binary.
+
+  Returns `{mti, remaining_binary}` where MTI is 4 bytes.
+  """
+  def extract_mti(<<mti::bytes-4, rest::binary>>), do: {mti, rest}
+  def extract_mti(_), do: {nil, <<>>}
+
   # Server Callbacks
 
   @impl true
@@ -1173,6 +1269,15 @@ defmodule Iso8583.Transport.TCP.Client do
     tpdu_address_size = Keyword.get(opts, :tpdu_address_size, 5)
     tpdu_source = Keyword.get(opts, :tpdu_source_address, <<0, 0, 0, 0, 1>>)
     tpdu_destination = Keyword.get(opts, :tpdu_destination_address, <<0, 0, 0, 0, 2>>)
+
+    # Correlation configuration
+    correlation_fields = Keyword.get(opts, :correlation_fields, [11, 41, 42])
+    correlation_field_formats = Keyword.get(opts, :correlation_field_formats, %{
+      11 => "n 6",    # STAN - System Trace Audit Number
+      41 => "ans 8",  # TID - Terminal ID
+      42 => "ans 15"  # MID - Merchant ID
+    })
+    correlation_msg_type = Keyword.get(opts, :correlation_msg_type, %{bitmap_type: :binary, field_header_type: :bcd})
 
     # Register in client registry if name is provided
     if registry_name do
@@ -1202,7 +1307,10 @@ defmodule Iso8583.Transport.TCP.Client do
        messages_received: 0,
        pending_requests: %{},
        request_tpdu: nil,
-       buffer: <<>>
+       buffer: <<>>,
+       correlation_fields: correlation_fields,
+       correlation_field_formats: correlation_field_formats,
+       correlation_msg_type: correlation_msg_type
      }}
   end
 
@@ -1233,42 +1341,77 @@ defmodule Iso8583.Transport.TCP.Client do
         new_messages_received = state.messages_received + messages_count
         new_bytes_received = state.bytes_received + bytes_received
 
-        # Process each received message
-        Enum.each(messages, fn data ->
-          if state.receive_callback do
-            # Extract TPDU from response if enabled
-            {data_without_tpdu, response_tpdu} = if state.tpdu_enabled do
-              case TPDU.extract(data, state.tpdu_address_size) do
-                {:ok, tpdu, rest} ->
-                  {rest, tpdu}
-                {:error, _} ->
-                  {data, nil}
-              end
-            else
-              {data, nil}
+        # Process each received message - check for correlated responses first
+        new_pending = Enum.reduce(messages, state.pending_requests, fn data, pending ->
+          # Extract TPDU from response if enabled
+          {data_without_tpdu, response_tpdu} = if state.tpdu_enabled do
+            case TPDU.extract(data, state.tpdu_address_size) do
+              {:ok, tpdu, rest} ->
+                {rest, tpdu}
+              {:error, _} ->
+                {data, nil}
             end
+          else
+            {data, nil}
+          end
 
-            context =
-              Context.new(
-                transport_ref: :client,
-                client_id: "tcp_client",
-                peer_address: state.host,
-                transport_metadata: %{
-                  connection_time: state.connection_time,
-                  bytes_sent: state.bytes_sent,
-                  bytes_received: new_bytes_received,
-                  messages_received: new_messages_received,
-                  tpdu: response_tpdu
-                }
-              )
+          # Try to match with pending request using correlation key
+          case extract_correlation_key(data_without_tpdu, state.correlation_fields, state.correlation_field_formats, state.correlation_msg_type) do
+            {:ok, correlation_key} ->
+              case Map.get(pending, correlation_key) do
+                {from, _ref, _timestamp} ->
+                  # Found matching pending request - reply to it
+                  GenServer.reply(from, {:ok, data_without_tpdu})
+                  Map.delete(pending, correlation_key)
 
-            state.receive_callback.(data_without_tpdu, context)
+                nil ->
+                  # No matching pending request - pass to callback
+                  if state.receive_callback do
+                    context =
+                      Context.new(
+                        transport_ref: :client,
+                        client_id: "tcp_client",
+                        peer_address: state.host,
+                        transport_metadata: %{
+                          connection_time: state.connection_time,
+                          bytes_sent: state.bytes_sent,
+                          bytes_received: new_bytes_received,
+                          messages_received: new_messages_received,
+                          tpdu: response_tpdu
+                        }
+                      )
+
+                    state.receive_callback.(data_without_tpdu, context)
+                  end
+                  pending
+              end
+
+            {:error, _reason} ->
+              # Failed to extract correlation key - pass to callback
+              if state.receive_callback do
+                context =
+                  Context.new(
+                    transport_ref: :client,
+                    client_id: "tcp_client",
+                    peer_address: state.host,
+                    transport_metadata: %{
+                      connection_time: state.connection_time,
+                      bytes_sent: state.bytes_sent,
+                      bytes_received: new_bytes_received,
+                      messages_received: new_messages_received,
+                      tpdu: response_tpdu
+                    }
+                  )
+
+                state.receive_callback.(data_without_tpdu, context)
+              end
+              pending
           end
         end)
 
         # Continue receiving
         :erlang.send(self(), :receive)
-        {:noreply, %{state | buffer: new_buffer, bytes_received: new_bytes_received, messages_received: new_messages_received}}
+        {:noreply, %{state | buffer: new_buffer, bytes_received: new_bytes_received, messages_received: new_messages_received, pending_requests: new_pending}}
 
       {:error, :timeout} ->
         :erlang.send(self(), :receive)
@@ -1277,12 +1420,12 @@ defmodule Iso8583.Transport.TCP.Client do
       {:error, :closed} ->
         Logger.warning("Connection closed to #{state.host}:#{state.port}")
         :erlang.send(self(), :connect)
-        {:noreply, %{state | socket: nil, connection_time: nil, buffer: <<>>}}
+        {:noreply, %{state | socket: nil, connection_time: nil, buffer: <<>>, pending_requests: %{}}}
 
       {:error, reason} ->
         Logger.error("Receive error: #{inspect(reason)}")
         :erlang.send(self(), :connect)
-        {:noreply, %{state | socket: nil, connection_time: nil, buffer: <<>>}}
+        {:noreply, %{state | socket: nil, connection_time: nil, buffer: <<>>, pending_requests: %{}}}
     end
   end
 
@@ -1290,6 +1433,51 @@ defmodule Iso8583.Transport.TCP.Client do
   def handle_info(:receive, state) do
     # Not connected, wait for connect
     {:noreply, state}
+  end
+
+  @impl true
+  def handle_call({:send_and_wait, request, correlation_fields_override}, from, state) do
+    if state.socket do
+      # Determine which correlation fields to use
+      correlation_fields = correlation_fields_override || state.correlation_fields
+
+      # Extract correlation key from request
+      case extract_correlation_key(request, correlation_fields, state.correlation_field_formats, state.correlation_msg_type) do
+        {:ok, correlation_key} ->
+          # Add TPDU if enabled
+          data_with_tpdu = if state.tpdu_enabled do
+            tpdu = %{
+              destination: state.tpdu_destination_address,
+              source: state.tpdu_source_address
+            }
+            TPDU.prepend(request, tpdu, state.tpdu_address_size)
+          else
+            request
+          end
+
+          # Frame the data if using length_prefix
+          framed_data = frame_data(data_with_tpdu, state.packet_handler)
+
+          case :gen_tcp.send(state.socket, framed_data) do
+            :ok ->
+              # Store pending request with correlation key
+              ref = make_ref()
+              pending = Map.put(state.pending_requests, correlation_key, {from, ref, System.monotonic_time(:millisecond)})
+
+              # Don't reply yet - wait for correlated response
+              {:noreply, %{state | bytes_sent: state.bytes_sent + byte_size(framed_data),
+                              pending_requests: pending}}
+
+            {:error, reason} ->
+              {:reply, {:error, reason}, state}
+          end
+
+        {:error, _reason} = error ->
+          {:reply, error, state}
+      end
+    else
+      {:reply, {:error, :not_connected}, state}
+    end
   end
 
   @impl true
