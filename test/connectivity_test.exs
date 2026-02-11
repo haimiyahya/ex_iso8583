@@ -1391,6 +1391,159 @@ defmodule Iso8583.Transport.HTTP.ClientTest do
       Client.stop(pid)
     end
   end
+
+  describe "correlation configuration" do
+    test "starts with default correlation fields" do
+      {:ok, pid} = Client.start_link(
+        url: "http://localhost:14007/iso8583"
+      )
+
+      state = :sys.get_state(pid)
+      assert state.correlation_fields == [11, 41, 42]
+      assert state.correlation_field_formats == %{
+        11 => "n 6",
+        41 => "ans 8",
+        42 => "ans 15"
+      }
+      assert state.correlation_msg_type == %{bitmap_type: :binary, field_header_type: :bcd}
+
+      Client.stop(pid)
+    end
+
+    test "starts with custom correlation fields" do
+      {:ok, pid} = Client.start_link(
+        url: "http://localhost:14008/iso8583",
+        correlation_fields: [11, 37],
+        correlation_field_formats: %{
+          11 => "n 6",
+          37 => "an 12"
+        }
+      )
+
+      state = :sys.get_state(pid)
+      assert state.correlation_fields == [11, 37]
+      assert state.correlation_field_formats == %{
+        11 => "n 6",
+        37 => "an 12"
+      }
+
+      Client.stop(pid)
+    end
+  end
+
+  describe "extract_correlation_key/4" do
+    test "extracts correlation key from ISO message with default fields" do
+      msg_type = %{bitmap_type: :binary, field_header_type: :bcd}
+      field_formats = %{
+        11 => "n 6",
+        41 => "ans 8",
+        42 => "ans 15"
+      }
+
+      fields = %{
+        11 => "000123",
+        41 => "12345678",
+        42 => "MERCHANT001"
+      }
+
+      iso_msg = Ex_Iso8583.form_iso_msg(fields, msg_type, field_formats)
+      full_msg = "0200" <> iso_msg
+
+      assert {:ok, key} = Client.extract_correlation_key(
+        full_msg,
+        [11, 41, 42],
+        field_formats,
+        msg_type
+      )
+
+      assert key == {{11, "000123"}, {41, "12345678"}, {42, "    MERCHANT001"}}
+    end
+
+    test "extracts correlation key with custom field order" do
+      msg_type = %{bitmap_type: :binary, field_header_type: :bcd}
+      field_formats = %{
+        11 => "n 6",
+        37 => "an 12"
+      }
+
+      fields = %{
+        11 => "999999",
+        37 => "REF123456789"
+      }
+
+      iso_msg = Ex_Iso8583.form_iso_msg(fields, msg_type, field_formats)
+      full_msg = "0200" <> iso_msg
+
+      assert {:ok, key} = Client.extract_correlation_key(
+        full_msg,
+        [11, 37],
+        field_formats,
+        msg_type
+      )
+
+      assert key == {{11, "999999"}, {37, "REF123456789"}}
+    end
+
+    test "handles missing fields gracefully" do
+      msg_type = %{bitmap_type: :binary, field_header_type: :bcd}
+      field_formats = %{
+        11 => "n 6",
+        41 => "ans 8"
+      }
+
+      # Only include field 11, not 41
+      fields = %{11 => "000001"}
+      iso_msg = Ex_Iso8583.form_iso_msg(fields, msg_type, field_formats)
+      full_msg = "0200" <> iso_msg
+
+      # Should still return a key with nil for missing field
+      assert {:ok, key} = Client.extract_correlation_key(
+        full_msg,
+        [11, 41],
+        field_formats,
+        msg_type
+      )
+
+      assert key == {{11, "000001"}, {41, nil}}
+    end
+
+    test "returns error for invalid ISO message" do
+      msg_type = %{bitmap_type: :binary, field_header_type: :bcd}
+      field_formats = %{11 => "n 6"}
+
+      # Invalid message (too short)
+      invalid_msg = <<0x02, 0x00>>
+
+      assert {:error, {:parse_failed, _reason}} = Client.extract_correlation_key(
+        invalid_msg,
+        [11],
+        field_formats,
+        msg_type
+      )
+    end
+  end
+
+  describe "extract_mti/1" do
+    test "extracts MTI from valid ISO message" do
+      msg = <<0x02, 0x00, 0xB2, 0x20, 0x00, 0x00, 0x00, 0x10>>
+      assert {mti, rest} = Client.extract_mti(msg)
+      assert byte_size(mti) == 4
+      assert byte_size(rest) == 4
+    end
+
+    test "handles short message (less than 4 bytes)" do
+      msg = <<0x02, 0x00>>
+      assert {mti, rest} = Client.extract_mti(msg)
+      # Messages less than 4 bytes return nil for MTI
+      assert mti == nil
+      assert rest == <<>>
+    end
+
+    test "handles empty message" do
+      msg = <<>>
+      assert {nil, <<>>} = Client.extract_mti(msg)
+    end
+  end
 end
 
 defmodule Iso8583.Transport.WebSocket.ServerTest do

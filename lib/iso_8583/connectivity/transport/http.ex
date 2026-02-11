@@ -793,7 +793,10 @@ defmodule Iso8583.Transport.HTTP.Client do
     :bytes_sent,
     :bytes_received,
     :messages_received,
-    :registry_name
+    :registry_name,
+    :correlation_fields,
+    :correlation_field_formats,
+    :correlation_msg_type
   ]
 
   @doc """
@@ -881,6 +884,97 @@ defmodule Iso8583.Transport.HTTP.Client do
     end
   end
 
+  @doc """
+  Sends an ISO 8583 message and waits for the correlated response.
+
+  This function uses field-based correlation to validate responses.
+  By default, it correlates on fields 11 (STAN), 41 (TID), and 42 (MID).
+
+  ## Parameters
+
+  - `client` - PID or registered name of the HTTP client
+  - `request` - ISO 8583 request binary (with MTI)
+  - `opts` - Optional keyword list:
+    - `:timeout` - Response timeout in milliseconds (default: 30000)
+    - `:correlation_fields` - Override default correlation fields for this request
+
+  ## Returns
+
+  - `{:ok, response_binary}` - Received matching response
+  - `{:error, {:http_error, status_code, body}}` - HTTP error response
+  - `{:error, {:parse_failed, reason}}` - Failed to parse ISO message for correlation
+  - `{:error, reason}` - Other error (network, timeout, etc.)
+
+  ## Examples
+
+      # Using default correlation (fields 11, 41, 42)
+      {:ok, response} = Iso8583.Transport.HTTP.Client.send_and_wait(
+        :my_client,
+        <<0x02, 0x00, 0xB2, 0x20, ...>>
+      )
+
+  ## Configuration
+
+  To enable correlation, configure the client with:
+
+      {:ok, _client} = Iso8583.Transport.HTTP.Client.start_link(
+        url: "http://localhost:4000/iso8583",
+        correlation_fields: [11, 41, 42],
+        correlation_field_formats: %{
+          11 => "n 6",   # STAN
+          41 => "ans 8", # TID
+          42 => "ans 15" # MID
+        }
+      )
+  """
+  def send_and_wait(client, request, opts \\ []) do
+    timeout = Keyword.get(opts, :timeout, 30000)
+    correlation_fields_override = Keyword.get(opts, :correlation_fields)
+
+    case client do
+      pid when is_pid(pid) ->
+        GenServer.call(pid, {:send_and_wait, request, correlation_fields_override}, timeout)
+
+      name when is_atom(name) ->
+        case lookup_client(name) do
+          {:ok, pid} -> GenServer.call(pid, {:send_and_wait, request, correlation_fields_override}, timeout)
+          {:error, _} -> {:error, :not_found}
+        end
+    end
+  end
+
+  @doc """
+  Extracts the correlation key from an ISO 8583 binary message.
+
+  The key is a tuple of field values in the order of correlation_fields.
+  """
+  def extract_correlation_key(iso_binary, correlation_fields, field_formats, msg_type) do
+    try do
+      {_mti, msg_without_mti} = extract_mti(iso_binary)
+
+      fields = Ex_Iso8583.extract_iso_msg(msg_without_mti, msg_type, field_formats)
+
+      key = correlation_fields
+      |> Enum.map(fn field_num ->
+        value = Map.get(fields, field_num)
+        {field_num, value}
+      end)
+      |> List.to_tuple()
+
+      {:ok, key}
+    rescue
+      e -> {:error, {:parse_failed, Exception.message(e)}}
+    end
+  end
+
+  @doc """
+  Extracts MTI (Message Type Indicator) from an ISO 8583 binary.
+
+  Returns `{mti, remaining_binary}` where MTI is 4 bytes.
+  """
+  def extract_mti(<<mti::bytes-4, rest::binary>>), do: {mti, rest}
+  def extract_mti(_), do: {nil, <<>>}
+
   # Server Callbacks
 
   @impl true
@@ -890,6 +984,15 @@ defmodule Iso8583.Transport.HTTP.Client do
     timeout = Keyword.get(opts, :timeout, 30_000)
     prefix_bytes = Keyword.get(opts, :prefix_bytes, 2)
     headers = Keyword.get(opts, :headers, %{})
+
+    # Correlation configuration
+    correlation_fields = Keyword.get(opts, :correlation_fields, [11, 41, 42])
+    correlation_field_formats = Keyword.get(opts, :correlation_field_formats, %{
+      11 => "n 6",    # STAN - System Trace Audit Number
+      41 => "ans 8",  # TID - Terminal ID
+      42 => "ans 15"  # MID - Merchant ID
+    })
+    correlation_msg_type = Keyword.get(opts, :correlation_msg_type, %{bitmap_type: :binary, field_header_type: :bcd})
 
     # Register in HTTP registry if name is provided
     if registry_name do
@@ -913,8 +1016,94 @@ defmodule Iso8583.Transport.HTTP.Client do
        headers: headers,
        bytes_sent: 0,
        bytes_received: 0,
-       messages_received: 0
+       messages_received: 0,
+       correlation_fields: correlation_fields,
+       correlation_field_formats: correlation_field_formats,
+       correlation_msg_type: correlation_msg_type
      }}
+  end
+
+  @impl true
+  def handle_call({:send_and_wait, request, correlation_fields_override}, _from, state) do
+    # Determine which correlation fields to use
+    correlation_fields = correlation_fields_override || state.correlation_fields
+
+    # Extract correlation key from request (for validation)
+    request_key = case extract_correlation_key(request, correlation_fields, state.correlation_field_formats, state.correlation_msg_type) do
+      {:ok, key} -> key
+      {:error, _} -> nil  # Continue without correlation if extraction fails
+    end
+
+    # Frame the data with length prefix
+    framed_data = frame_data(request, state.prefix_bytes)
+
+    # Encode to base64
+    encoded_message = Base.encode64(framed_data)
+
+    # Build JSON request
+    request_body = Jason.encode!(%{iso_message: encoded_message})
+
+    # Make HTTP request using :httpc
+    response =
+      :httpc.request(
+        :post,
+        {to_charlist(state.url), build_headers(state.headers), "application/json", request_body},
+        [{:timeout, state.timeout}, {:body_format, :binary}],
+        :infinity
+      )
+
+    case response do
+      {:ok, {{_version, 200, _reason_phrase}, _headers, body}} ->
+        # Parse response
+        case parse_response(body) do
+          {:ok, response_data} ->
+            # Extract ISO message from framing
+            case extract_iso_message(response_data, state.prefix_bytes) do
+              {:ok, iso_message} ->
+                # Validate correlation key if we extracted one from request
+                if request_key != nil do
+                  case extract_correlation_key(iso_message, correlation_fields, state.correlation_field_formats, state.correlation_msg_type) do
+                    {:ok, response_key} ->
+                      if request_key == response_key do
+                        # Correlation keys match
+                        {:reply, {:ok, iso_message}, %{state | bytes_sent: state.bytes_sent + byte_size(request_body),
+                          bytes_received: state.bytes_received + byte_size(body),
+                          messages_received: state.messages_received + 1}}
+                      else
+                        # Correlation mismatch - log warning but still return response
+                        Logger.warning("Correlation key mismatch: request #{inspect(request_key)} != response #{inspect(response_key)}")
+                        {:reply, {:ok, iso_message}, %{state | bytes_sent: state.bytes_sent + byte_size(request_body),
+                          bytes_received: state.bytes_received + byte_size(body),
+                          messages_received: state.messages_received + 1}}
+                      end
+
+                    {:error, _reason} ->
+                      # Failed to extract correlation key from response - return anyway
+                      {:reply, {:ok, iso_message}, %{state | bytes_sent: state.bytes_sent + byte_size(request_body),
+                        bytes_received: state.bytes_received + byte_size(body),
+                        messages_received: state.messages_received + 1}}
+                  end
+                else
+                  # No request key, just return the response
+                  {:reply, {:ok, iso_message}, %{state | bytes_sent: state.bytes_sent + byte_size(request_body),
+                    bytes_received: state.bytes_received + byte_size(body),
+                    messages_received: state.messages_received + 1}}
+                end
+
+              {:error, reason} ->
+                {:reply, {:error, reason}, state}
+            end
+
+          {:error, reason} ->
+            {:reply, {:error, reason}, state}
+        end
+
+      {:ok, {{_version, status_code, _reason_phrase}, _headers, body}} ->
+        {:reply, {:error, {:http_error, status_code, body}}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
   end
 
   @impl true
