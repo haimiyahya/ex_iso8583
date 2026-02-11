@@ -64,6 +64,7 @@ defmodule Iso8583.Transport.HTTP.Server do
   | `:scheme` | `:http \| :https` | `:http` | HTTP or HTTPS |
   | `:name` | `atom()` | `nil` | Name for registration |
   | `:timeout` | `integer()` | `30000` | Request timeout (ms) |
+  | `:prefix_bytes` | `1 \| 2 \| 4` | `2` | Length prefix bytes for framing |
   | `:tpdu_enabled` | `boolean()` | `false` | Enable TPDU handling |
   | `:tpdu_address_size` | `integer()` | `5` | TPDU address size in bytes |
 
@@ -107,6 +108,7 @@ defmodule Iso8583.Transport.HTTP.Server do
     name = Keyword.get(opts, :name)
     certfile = Keyword.get(opts, :certfile)
     keyfile = Keyword.get(opts, :keyfile)
+    prefix_bytes = Keyword.get(opts, :prefix_bytes, 2)
     tpdu_enabled = Keyword.get(opts, :tpdu_enabled, false)
     tpdu_address_size = Keyword.get(opts, :tpdu_address_size, 5)
 
@@ -120,6 +122,7 @@ defmodule Iso8583.Transport.HTTP.Server do
         name: name,
         certfile: certfile,
         keyfile: keyfile,
+        prefix_bytes: prefix_bytes,
         tpdu_enabled: tpdu_enabled,
         tpdu_address_size: tpdu_address_size
       ],
@@ -203,6 +206,7 @@ defmodule Iso8583.Transport.HTTP.Server do
     name = Keyword.get(opts, :name)
     certfile = Keyword.get(opts, :certfile)
     keyfile = Keyword.get(opts, :keyfile)
+    prefix_bytes = Keyword.get(opts, :prefix_bytes, 2)
     tpdu_enabled = Keyword.get(opts, :tpdu_enabled, false)
     tpdu_address_size = Keyword.get(opts, :tpdu_address_size, 5)
 
@@ -219,6 +223,7 @@ defmodule Iso8583.Transport.HTTP.Server do
          path: path,
          timeout: timeout,
          registry_name: name,
+         prefix_bytes: prefix_bytes,
          tpdu_enabled: tpdu_enabled,
          tpdu_address_size: tpdu_address_size,
          name: state_name
@@ -258,6 +263,7 @@ defmodule Iso8583.Transport.HTTP.Server.State do
     :path,
     :timeout,
     :registry_name,
+    :prefix_bytes,
     :tpdu_enabled,
     :tpdu_address_size,
     :connection_time,
@@ -276,6 +282,7 @@ defmodule Iso8583.Transport.HTTP.Server.State do
     path = Keyword.get(opts, :path, "/iso8583")
     timeout = Keyword.get(opts, :timeout, 30_000)
     registry_name = Keyword.get(opts, :registry_name)
+    prefix_bytes = Keyword.get(opts, :prefix_bytes, 2)
     tpdu_enabled = Keyword.get(opts, :tpdu_enabled, false)
     tpdu_address_size = Keyword.get(opts, :tpdu_address_size, 5)
 
@@ -295,6 +302,7 @@ defmodule Iso8583.Transport.HTTP.Server.State do
        path: path,
        timeout: timeout,
        registry_name: registry_name,
+       prefix_bytes: prefix_bytes,
        tpdu_enabled: tpdu_enabled,
        tpdu_address_size: tpdu_address_size,
        connection_time: System.system_time(:millisecond),
@@ -314,6 +322,10 @@ defmodule Iso8583.Transport.HTTP.Server.State do
 
   def handle_call(:get_tpdu_config, _from, state) do
     {:reply, {state.tpdu_enabled, state.tpdu_address_size}, state}
+  end
+
+  def handle_call(:get_prefix_bytes, _from, state) do
+    {:reply, state.prefix_bytes, state}
   end
 
   def handle_call(:get_stats, _from, state) do
@@ -440,15 +452,16 @@ defmodule Iso8583.Transport.HTTP.Server.Plug do
   end
 
   defp handle_iso_request(conn, state_name) do
-    # Get state configuration (TPDU enabled, etc)
+    # Get state configuration (TPDU enabled, prefix_bytes, etc)
     {tpdu_enabled, tpdu_address_size} = get_tpdu_config(state_name)
+    prefix_bytes = get_prefix_bytes(state_name)
     {stats, _} = get_stats(state_name)
 
     case read_full_body(conn, "") do
       {:ok, body, conn} ->
         bytes_received = byte_size(body)
 
-        case parse_request(body, tpdu_enabled, tpdu_address_size) do
+        case parse_request(body, tpdu_enabled, tpdu_address_size, prefix_bytes) do
           {:ok, iso_message, request_id, request_tpdu} ->
             # Get callback
             case get_callback(state_name) do
@@ -462,8 +475,8 @@ defmodule Iso8583.Transport.HTTP.Server.Plug do
                 # Call processor
                 case callback.(iso_message, context) do
                   {:ok, response} ->
-                    # Encode response with TPDU if enabled
-                    response_data = encode_response(response, request_tpdu, tpdu_enabled, tpdu_address_size)
+                    # Encode response with TPDU if enabled and add framing
+                    response_data = encode_response(response, request_tpdu, tpdu_enabled, tpdu_address_size, prefix_bytes)
                     bytes_sent = byte_size(Jason.encode!(%{iso_message: Base.encode64(response_data)}))
 
                     # Update stats
@@ -496,22 +509,28 @@ defmodule Iso8583.Transport.HTTP.Server.Plug do
     end
   end
 
-  defp parse_request(body, tpdu_enabled, tpdu_address_size) do
+  defp parse_request(body, tpdu_enabled, tpdu_address_size, prefix_bytes) do
     case Jason.decode(body) do
       {:ok, %{"iso_message" => encoded_msg} = data} ->
         case Base.decode64(encoded_msg) do
           {:ok, raw_message} ->
+            # Extract length-prefix framing first
+            {iso_with_tpdu, _framing_extracted} = case extract_framing(raw_message, prefix_bytes) do
+              {:ok, message} -> {message, true}
+              {:error, _} -> {raw_message, false}  # No valid framing, use as-is
+            end
+
             # Extract TPDU if enabled
             {iso_message, request_tpdu} = if tpdu_enabled do
-              case TPDU.extract(raw_message, tpdu_address_size) do
+              case TPDU.extract(iso_with_tpdu, tpdu_address_size) do
                 {:ok, tpdu, rest} ->
                   {rest, tpdu}
                 {:error, _} ->
-                  # TPDU extraction failed, use raw message
-                  {raw_message, nil}
+                  # TPDU extraction failed, use message as-is
+                  {iso_with_tpdu, nil}
               end
             else
-              {raw_message, nil}
+              {iso_with_tpdu, nil}
             end
 
             request_id = Map.get(data, "request_id")
@@ -529,8 +548,23 @@ defmodule Iso8583.Transport.HTTP.Server.Plug do
     end
   end
 
-  defp encode_response(response, request_tpdu, tpdu_enabled, tpdu_address_size) do
-    if tpdu_enabled and request_tpdu do
+  defp extract_framing(data, prefix_bytes) do
+    if byte_size(data) < prefix_bytes do
+      {:error, :incomplete}
+    else
+      <<msg_length::big-integer-size(prefix_bytes * 8), rest::binary>> = data
+      if byte_size(rest) >= msg_length do
+        <<message::binary-size(msg_length), _remaining::binary>> = rest
+        {:ok, message}
+      else
+        {:error, :incomplete}
+      end
+    end
+  end
+
+  defp encode_response(response, request_tpdu, tpdu_enabled, tpdu_address_size, prefix_bytes) do
+    # First add TPDU if enabled
+    with_tpdu = if tpdu_enabled and request_tpdu do
       # Swap source/destination for response
       response_tpdu = %{
         destination: request_tpdu.source,
@@ -540,6 +574,10 @@ defmodule Iso8583.Transport.HTTP.Server.Plug do
     else
       response
     end
+
+    # Then add length-prefix framing
+    length = byte_size(with_tpdu)
+    <<length::big-integer-size(prefix_bytes * 8), with_tpdu::binary>>
   end
 
   defp get_callback(state_name) do
@@ -558,6 +596,15 @@ defmodule Iso8583.Transport.HTTP.Server.Plug do
     end
   rescue
     _ -> {false, 5}
+  end
+
+  defp get_prefix_bytes(state_name) do
+    case GenServer.call(state_name, :get_prefix_bytes) do
+      bytes when is_integer(bytes) and bytes > 0 -> bytes
+      _ -> 2  # Default to 2 bytes
+    end
+  rescue
+    _ -> 2  # Default to 2 bytes on error
   end
 
   defp get_stats(state_name) do
