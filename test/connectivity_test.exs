@@ -1702,3 +1702,240 @@ defmodule Iso8583.Transport.WebSocket.ClientTest do
     end
   end
 end
+
+defmodule Iso8583.Transport.WebSocket.Client.CorrelationTest do
+  use ExUnit.Case
+
+  alias Iso8583.Transport.WebSocket.Client
+
+  describe "correlation configuration" do
+    test "starts with default correlation fields" do
+      {:ok, pid} = Client.start_link(
+        url: "ws://localhost:14360/ws",
+        reconnect_interval: 100
+      )
+
+      state = :sys.get_state(pid)
+      assert state.correlation_fields == [11, 41, 42]
+      assert state.correlation_field_formats == %{
+        11 => "n 6",
+        41 => "ans 8",
+        42 => "ans 15"
+      }
+      assert state.correlation_msg_type == %{bitmap_type: :binary, field_header_type: :bcd}
+
+      Client.stop(pid)
+      Process.sleep(200)
+    end
+
+    test "starts with custom correlation fields" do
+      {:ok, pid} = Client.start_link(
+        url: "ws://localhost:14361/ws",
+        correlation_fields: [11, 37],
+        correlation_field_formats: %{
+          11 => "n 6",
+          37 => "an 12"
+        },
+        reconnect_interval: 100
+      )
+
+      state = :sys.get_state(pid)
+      assert state.correlation_fields == [11, 37]
+      assert state.correlation_field_formats == %{
+        11 => "n 6",
+        37 => "an 12"
+      }
+
+      Client.stop(pid)
+      Process.sleep(200)
+    end
+
+    test "initializes pending_requests as empty map" do
+      {:ok, pid} = Client.start_link(
+        url: "ws://localhost:14362/ws",
+        reconnect_interval: 100
+      )
+
+      state = :sys.get_state(pid)
+      assert state.pending_requests == %{}
+
+      Client.stop(pid)
+      Process.sleep(200)
+    end
+  end
+
+  describe "extract_correlation_key/4" do
+    test "extracts correlation key from ISO message with default fields" do
+      # Build an ISO message with MTI + bitmap + fields 11, 41, 42
+      # MTI: 0200
+      # Bitmap: has fields 11, 41, 42
+      # Field 11 (STAN): "000123"
+      # Field 41 (TID): "12345678"
+      # Field 42 (MID): "MERCHANT001"
+
+      msg_type = %{bitmap_type: :binary, field_header_type: :bcd}
+      field_formats = %{
+        11 => "n 6",
+        41 => "ans 8",
+        42 => "ans 15"
+      }
+
+      # Create a simple ISO message with the required fields
+      fields = %{
+        11 => "000123",
+        41 => "12345678",
+        42 => "MERCHANT001"
+      }
+
+      iso_msg = Ex_Iso8583.form_iso_msg(fields, msg_type, field_formats)
+      full_msg = "0200" <> iso_msg
+
+      assert {:ok, key} = Client.extract_correlation_key(
+        full_msg,
+        [11, 41, 42],
+        field_formats,
+        msg_type
+      )
+
+      # Field 42 (ans 15) is left-padded with spaces to 15 characters
+      assert key == {{11, "000123"}, {41, "12345678"}, {42, "    MERCHANT001"}}
+    end
+
+    test "extracts correlation key with custom field order" do
+      msg_type = %{bitmap_type: :binary, field_header_type: :bcd}
+      field_formats = %{
+        11 => "n 6",
+        37 => "an 12"
+      }
+
+      fields = %{
+        11 => "999999",
+        37 => "REF123456789"
+      }
+
+      iso_msg = Ex_Iso8583.form_iso_msg(fields, msg_type, field_formats)
+      full_msg = "0200" <> iso_msg
+
+      assert {:ok, key} = Client.extract_correlation_key(
+        full_msg,
+        [11, 37],
+        field_formats,
+        msg_type
+      )
+
+      assert key == {{11, "999999"}, {37, "REF123456789"}}
+    end
+
+    test "handles missing fields gracefully" do
+      msg_type = %{bitmap_type: :binary, field_header_type: :bcd}
+      field_formats = %{
+        11 => "n 6",
+        41 => "ans 8"
+      }
+
+      # Only include field 11, not 41
+      fields = %{11 => "000001"}
+      iso_msg = Ex_Iso8583.form_iso_msg(fields, msg_type, field_formats)
+      full_msg = "0200" <> iso_msg
+
+      # Should still return a key with nil for missing field
+      assert {:ok, key} = Client.extract_correlation_key(
+        full_msg,
+        [11, 41],
+        field_formats,
+        msg_type
+      )
+
+      assert key == {{11, "000001"}, {41, nil}}
+    end
+
+    test "returns error for invalid ISO message" do
+      msg_type = %{bitmap_type: :binary, field_header_type: :bcd}
+      field_formats = %{11 => "n 6"}
+
+      # Invalid message (too short)
+      invalid_msg = <<0x02, 0x00>>
+
+      assert {:error, {:parse_failed, _reason}} = Client.extract_correlation_key(
+        invalid_msg,
+        [11],
+        field_formats,
+        msg_type
+      )
+    end
+  end
+
+  describe "extract_mti/1" do
+    test "extracts MTI from valid ISO message" do
+      msg = <<0x02, 0x00, 0xB2, 0x20, 0x00, 0x00, 0x00, 0x10>>
+      assert {mti, rest} = Client.extract_mti(msg)
+      # MTI is extracted as 4 bytes
+      assert byte_size(mti) == 4
+      assert byte_size(rest) == 4
+    end
+
+    test "handles short message (less than 4 bytes)" do
+      msg = <<0x02, 0x00>>
+      assert {mti, rest} = Client.extract_mti(msg)
+      # Messages less than 4 bytes return nil for MTI
+      assert mti == nil
+      assert rest == <<>>
+    end
+
+    test "handles empty message" do
+      msg = <<>>
+      assert {nil, <<>>} = Client.extract_mti(msg)
+    end
+  end
+
+  describe "send_and_wait/3" do
+    test "returns error when client is not connected" do
+      {:ok, pid} = Client.start_link(
+        url: "ws://localhost:14363/ws",
+        reconnect_interval: 100
+      )
+
+      # Create a test ISO message
+      msg_type = %{bitmap_type: :binary, field_header_type: :bcd}
+      field_formats = %{11 => "n 6"}
+      fields = %{11 => "000001"}
+      iso_msg = Ex_Iso8583.form_iso_msg(fields, msg_type, field_formats)
+      full_msg = "0200" <> iso_msg
+
+      # Should return {:error, :not_connected} since no server is running
+      result = Client.send_and_wait(pid, full_msg, timeout: 100)
+      assert result == {:error, :not_connected}
+
+      Client.stop(pid)
+      Process.sleep(200)
+    end
+
+    test "accepts custom correlation_fields override" do
+      {:ok, pid} = Client.start_link(
+        url: "ws://localhost:14364/ws",
+        correlation_fields: [11, 41, 42],
+        reconnect_interval: 100
+      )
+
+      # Create a test message
+      msg_type = %{bitmap_type: :binary, field_header_type: :bcd}
+      field_formats = %{
+        11 => "n 6",
+        37 => "an 12"
+      }
+      fields = %{11 => "000001", 37 => "REF123"}
+      iso_msg = Ex_Iso8583.form_iso_msg(fields, msg_type, field_formats)
+      full_msg = "0200" <> iso_msg
+
+      # Override to use different correlation fields for this request
+      result = Client.send_and_wait(pid, full_msg,
+        correlation_fields: [11, 37],
+        timeout: 100
+      )
+      assert result == {:error, :not_connected}
+
+      Client.stop(pid)
+      Process.sleep(200)
+    end
+  end
+end

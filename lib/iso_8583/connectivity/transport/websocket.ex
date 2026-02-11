@@ -1255,6 +1255,24 @@ defmodule Iso8583.Transport.WebSocket.Client do
           ]
       end
 
+  ### With Request-Response Correlation
+
+      {:ok, client} = Iso8583.Transport.WebSocket.Client.start_link(
+        url: "ws://localhost:4000/iso8583/ws",
+        correlation_fields: [11, 41, 42],
+        correlation_field_formats: %{
+          11 => "n 6",    # STAN - System Trace Audit Number
+          41 => "ans 8",  # TID - Terminal ID
+          42 => "ans 15"  # MID - Merchant ID
+        }
+      )
+
+      # Send and wait for correlated response
+      {:ok, response} = Iso8583.Transport.WebSocket.Client.send_and_wait(
+        client,
+        <<0x02, 0x00, ...>>  # ISO 8583 request binary
+      )
+
   ## Options
 
   | Option | Type | Default | Description |
@@ -1269,6 +1287,36 @@ defmodule Iso8583.Transport.WebSocket.Client do
   | `:tpdu_address_size` | `integer()` | `5` | TPDU address size in bytes |
   | `:tpdu_source_address` | `binary()` | `<<0,0,0,0,1>>` | Source address for requests |
   | `:tpdu_destination_address` | `binary()` | `<<0,0,0,0,2>>` | Destination address for requests |
+  | `:correlation_fields` | `[integer()]` | `[11, 41, 42]` | ISO fields for request-response correlation |
+  | `:correlation_field_formats` | `map()` | See below | Field formats for correlation fields |
+  | `:correlation_msg_type` | `map()` | `%{bitmap_type: :binary, field_header_type: :bcd}` | Message type config for parsing |
+
+  ### Correlation Configuration
+
+  The `correlation_fields` option specifies which ISO 8583 fields to use for
+  matching responses to requests. Defaults to `[11, 41, 42]` (STAN, TID, MID).
+
+  The `correlation_field_formats` defines how to parse each correlation field:
+
+      correlation_field_formats: %{
+        11 => "n 6",     # STAN: 6-digit numeric
+        41 => "ans 8",   # TID: 8-character alphanumeric
+        42 => "ans 15",  # MID: 15-character alphanumeric
+        # Add more fields as needed for your correlation
+      }
+
+  ### Custom Correlation
+
+  To use different fields for correlation:
+
+      {:ok, client} = Iso8583.Transport.WebSocket.Client.start_link(
+        url: "ws://localhost:4000/iso8583/ws",
+        correlation_fields: [11, 37],  # Use STAN and Retrieval Reference Number
+        correlation_field_formats: %{
+          11 => "n 6",
+          37 => "an 12"  # RRN - 12 character alphanumeric
+        }
+      )
 
   ## Message Framing
 
@@ -1375,7 +1423,11 @@ defmodule Iso8583.Transport.WebSocket.Client do
     :tpdu_destination_address,
     :request_tpdu,
     :registry_name,
-    :buffer
+    :buffer,
+    :correlation_fields,
+    :correlation_field_formats,
+    :correlation_msg_type,
+    :pending_requests
   ]
 
   @doc """
@@ -1485,6 +1537,121 @@ defmodule Iso8583.Transport.WebSocket.Client do
     end
   end
 
+  @doc """
+  Sends an ISO 8583 message and waits for the correlated response.
+
+  This function uses field-based correlation to match responses to requests.
+  By default, it correlates on fields 11 (STAN), 41 (TID), and 42 (MID).
+
+  ## Parameters
+
+  - `client` - PID or registered name of the WebSocket client
+  - `request` - ISO 8583 request binary (with MTI)
+  - `opts` - Optional keyword list:
+    - `:timeout` - Response timeout in milliseconds (default: 30000)
+    - `:correlation_fields` - Override default correlation fields for this request
+      (default: [11, 41, 42] from client config)
+
+  ## Returns
+
+  - `{:ok, response_binary}` - Received matching response
+  - `{:error, :not_connected}` - WebSocket is not connected
+  - `{:error, :not_configured}` - Correlation is not configured
+  - `{:error, :timeout}` - No response received within timeout
+  - `{:error, {:parse_failed, reason}}` - Failed to parse ISO message for correlation
+
+  ## Examples
+
+      # Using default correlation (fields 11, 41, 42)
+      {:ok, response} = Iso8583.Transport.WebSocket.Client.send_and_wait(
+        :my_client,
+        <<0x02, 0x00, 0xB2, 0x20, ...>>
+      )
+
+      # With custom timeout
+      {:ok, response} = Iso8583.Transport.WebSocket.Client.send_and_wait(
+        :my_client,
+        request,
+        timeout: 60_000
+      )
+
+  ## Configuration
+
+  To enable correlation, configure the client with:
+
+      {:ok, _client} = Iso8583.Transport.WebSocket.Client.start_link(
+        url: "ws://localhost:4000/iso8583/ws",
+        correlation_fields: [11, 41, 42],
+        correlation_field_formats: %{
+          11 => "n 6",   # STAN - 6 digit numeric
+          41 => "ans 8", # TID - 8 character alphanumeric
+          42 => "ans 15" # MID - 15 character alphanumeric
+        },
+        correlation_msg_type: %{bitmap_type: :binary, field_header_type: :bcd}
+      )
+
+  """
+  def send_and_wait(client, request, opts \\ []) do
+    timeout = Keyword.get(opts, :timeout, 30000)
+    correlation_fields_override = Keyword.get(opts, :correlation_fields)
+
+    case client do
+      pid when is_pid(pid) ->
+        GenServer.call(pid, {:send_and_wait, request, correlation_fields_override}, timeout)
+
+      name when is_atom(name) ->
+        case lookup_client(name) do
+          {:ok, pid} -> GenServer.call(pid, {:send_and_wait, request, correlation_fields_override}, timeout)
+          {:error, _} -> {:error, :not_found}
+        end
+    end
+  end
+
+  @doc """
+  Extracts the correlation key from an ISO 8583 binary message.
+
+  The key is a tuple of field values in the order of correlation_fields.
+
+  ## Examples
+
+      {:ok, key} = Iso8583.Transport.WebSocket.Client.extract_correlation_key(
+        iso_binary,
+        [11, 41, 42],
+        %{11 => "n 6", 41 => "ans 8", 42 => "ans 15"},
+        %{bitmap_type: :binary, field_header_type: :bcd}
+      )
+      # => {:ok, {{11, "000001"}, {41, "12345678"}, {42, "MERCHANT123"}}}
+  """
+  def extract_correlation_key(iso_binary, correlation_fields, field_formats, msg_type) do
+    try do
+      # Extract MTI (first 4 bytes/characters)
+      {_mti, msg_without_mti} = extract_mti(iso_binary)
+
+      # Parse ISO message to get fields
+      fields = Ex_Iso8583.extract_iso_msg(msg_without_mti, msg_type, field_formats)
+
+      # Build correlation key from specified fields
+      key = correlation_fields
+      |> Enum.map(fn field_num ->
+        value = Map.get(fields, field_num)
+        {field_num, value}
+      end)
+      |> List.to_tuple()
+
+      {:ok, key}
+    rescue
+      e -> {:error, {:parse_failed, Exception.message(e)}}
+    end
+  end
+
+  @doc """
+  Extracts MTI (Message Type Indicator) from an ISO 8583 binary.
+
+  Returns `{mti, remaining_binary}` where MTI is 4 bytes.
+  """
+  def extract_mti(<<mti::bytes-4, rest::binary>>), do: {mti, rest}
+  def extract_mti(_), do: {nil, <<>>}
+
   # Server Callbacks
 
   @impl true
@@ -1499,6 +1666,15 @@ defmodule Iso8583.Transport.WebSocket.Client do
     tpdu_address_size = Keyword.get(opts, :tpdu_address_size, 5)
     tpdu_source = Keyword.get(opts, :tpdu_source_address, <<0, 0, 0, 0, 1>>)
     tpdu_destination = Keyword.get(opts, :tpdu_destination_address, <<0, 0, 0, 0, 2>>)
+
+    # Correlation configuration
+    correlation_fields = Keyword.get(opts, :correlation_fields, [11, 41, 42])
+    correlation_field_formats = Keyword.get(opts, :correlation_field_formats, %{
+      11 => "n 6",    # STAN - System Trace Audit Number
+      41 => "ans 8",  # TID - Terminal ID
+      42 => "ans 15"  # MID - Merchant ID
+    })
+    correlation_msg_type = Keyword.get(opts, :correlation_msg_type, %{bitmap_type: :binary, field_header_type: :bcd})
 
     # Parse URL
     {scheme, host, port, path} = parse_url(url)
@@ -1534,7 +1710,11 @@ defmodule Iso8583.Transport.WebSocket.Client do
        tpdu_destination_address: tpdu_destination,
        request_tpdu: nil,
        registry_name: name,
-       buffer: <<>>
+       buffer: <<>>,
+       correlation_fields: correlation_fields,
+       correlation_field_formats: correlation_field_formats,
+       correlation_msg_type: correlation_msg_type,
+       pending_requests: %{}
      }}
   end
 
@@ -1572,23 +1752,46 @@ defmodule Iso8583.Transport.WebSocket.Client do
 
         Logger.info("Extracted #{length(iso_messages)} ISO messages (#{total_bytes} bytes)")
 
-        # Process each received message
-        Enum.each(iso_messages, fn data ->
-          if state.receive_callback do
-            # Extract TPDU if enabled (store response TPDU for next request)
-            {data_without_tpdu, response_tpdu} = if state.tpdu_enabled do
-              case TPDU.extract(data, state.tpdu_address_size) do
-                {:ok, tpdu, rest} ->
-                  {rest, tpdu}
-                {:error, _} ->
-                  {data, nil}
-              end
-            else
-              {data, nil}
+        # Process each received message - check for correlated responses first
+        new_pending = Enum.reduce(iso_messages, state.pending_requests, fn iso_msg, pending ->
+          # Extract TPDU if enabled
+          {data_without_tpdu, response_tpdu} = if state.tpdu_enabled do
+            case TPDU.extract(iso_msg, state.tpdu_address_size) do
+              {:ok, tpdu, rest} ->
+                {rest, tpdu}
+              {:error, _} ->
+                {iso_msg, nil}
             end
+          else
+            {iso_msg, nil}
+          end
 
-            context = build_context(state, response_tpdu)
-            state.receive_callback.(data_without_tpdu, context)
+          # Try to match with pending request using correlation key
+          case extract_correlation_key(data_without_tpdu, state.correlation_fields, state.correlation_field_formats, state.correlation_msg_type) do
+            {:ok, correlation_key} ->
+              case Map.get(pending, correlation_key) do
+                {from, _ref, _timestamp} ->
+                  # Found matching pending request - reply to it
+                  GenServer.reply(from, {:ok, data_without_tpdu})
+                  Logger.debug("Matched response for correlation key: #{inspect(correlation_key)}")
+                  Map.delete(pending, correlation_key)
+
+                nil ->
+                  # No matching pending request - pass to callback
+                  if state.receive_callback do
+                    context = build_context(state, response_tpdu)
+                    state.receive_callback.(data_without_tpdu, context)
+                  end
+                  pending
+              end
+
+            {:error, _reason} ->
+              # Failed to extract correlation key - pass to callback
+              if state.receive_callback do
+                context = build_context(state, response_tpdu)
+                state.receive_callback.(data_without_tpdu, context)
+              end
+              pending
           end
         end)
 
@@ -1597,7 +1800,7 @@ defmodule Iso8583.Transport.WebSocket.Client do
 
         {:noreply, %{state | buffer: new_buffer, bytes_received: state.bytes_received + total_bytes,
                          messages_received: state.messages_received + length(iso_messages),
-                         request_tpdu: nil}}
+                         request_tpdu: nil, pending_requests: new_pending}}
 
       {:error, reason} ->
         Logger.error("WebSocket decode error: #{inspect(reason)}")
@@ -1625,6 +1828,68 @@ defmodule Iso8583.Transport.WebSocket.Client do
   def handle_info(msg, state) do
     Logger.debug("Received unexpected message: #{inspect(msg)}")
     {:noreply, state}
+  end
+
+  @impl true
+  def handle_call({:send_and_wait, request, correlation_fields_override}, from, state) do
+    if state.socket do
+      # Determine which correlation fields to use
+      correlation_fields = correlation_fields_override || state.correlation_fields
+
+      # Extract correlation key from request
+      case extract_correlation_key(request, correlation_fields, state.correlation_field_formats, state.correlation_msg_type) do
+        {:ok, correlation_key} ->
+          # Add TPDU if enabled
+          data_with_tpdu = if state.tpdu_enabled do
+            tpdu = %{
+              destination: state.tpdu_destination_address,
+              source: state.tpdu_source_address
+            }
+            TPDU.prepend(request, tpdu, state.tpdu_address_size)
+          else
+            request
+          end
+
+          # Frame the data with length prefix
+          framed_data = frame_data(data_with_tpdu, state.prefix_bytes)
+
+          # Wrap in WebSocket binary frame
+          ws_frame = encode_websocket_frame(framed_data)
+
+          Logger.info("Sending with correlation key: #{inspect(correlation_key)}")
+
+          case :gen_tcp.send(state.socket, ws_frame) do
+            :ok ->
+              # Store pending request with correlation key
+              ref = make_ref()
+              pending = Map.put(state.pending_requests, correlation_key, {from, ref, System.monotonic_time(:millisecond)})
+
+              # Store request TPDU for response handling
+              new_request_tpdu = if state.tpdu_enabled do
+                %{
+                  destination: state.tpdu_destination_address,
+                  source: state.tpdu_source_address
+                }
+              else
+                nil
+              end
+
+              # Don't reply yet - wait for correlated response
+              {:noreply, %{state | bytes_sent: state.bytes_sent + byte_size(ws_frame),
+                              request_tpdu: new_request_tpdu,
+                              pending_requests: pending}}
+
+            {:error, reason} ->
+              Logger.error("Failed to send: #{inspect(reason)}")
+              {:reply, {:error, reason}, state}
+          end
+
+        {:error, _reason} = error ->
+          {:reply, error, state}
+      end
+    else
+      {:reply, {:error, :not_connected}, state}
+    end
   end
 
   @impl true
