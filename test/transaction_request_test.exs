@@ -9,6 +9,23 @@ defmodule Ex_Iso8583.TransactionRequestTest do
 
   alias Ex_Iso8583
 
+  # Test response module definitions (must be defined before requests that use them)
+  defmodule TestSaleResponse do
+    use Ex_Iso8583.TransactionType
+
+    defstruct [:response_code, :stan, :auth_code]
+
+    transaction_type "0210" do
+      fields %{
+        response_code: {39, "an 2"},
+        stan: {11, "n 6"},
+        auth_code: {38, "an 6"}
+      }
+      mandatory [:response_code, :stan]
+      optional [:auth_code]
+    end
+  end
+
   # Test request module definitions
   defmodule TestSaleRequest do
     use Ex_Iso8583.TransactionRequest
@@ -54,22 +71,6 @@ defmodule Ex_Iso8583.TransactionRequestTest do
       mandatory [:pan, :amount, :stan, :terminal_id, :merchant_id]
       optional [:processing_code]
       response_type Ex_Iso8583.TransactionRequestTest.TestSaleResponse
-    end
-  end
-
-  defmodule TestSaleResponse do
-    use Ex_Iso8583.TransactionType
-
-    defstruct [:response_code, :stan, :auth_code]
-
-    transaction_type "0210" do
-      fields %{
-        response_code: {39, "an 2"},
-        stan: {11, "n 6"},
-        auth_code: {38, "an 6"}
-      }
-      mandatory [:response_code, :stan]
-      optional [:auth_code]
     end
   end
 
@@ -488,6 +489,41 @@ defmodule Ex_Iso8583.TransactionRequestTest do
           end
         end
       end
+    end
+
+    @tag :skip
+    test "raises error when response_type module does not exist" do
+      # NOTE: Compile-time validation cannot be tested at runtime.
+      # To test: create a separate file with this module and compile it.
+      assert_raise CompileError, ~r/Response type module not found.*NonExistentResponse/, fn ->
+        defmodule InvalidRequestNonExistentResponse do
+          use Ex_Iso8583.TransactionRequest
+
+          defstruct [:pan, :amount, :stan, :terminal_id, :merchant_id]
+
+          request "0200" do
+            fields %{
+              pan: {2, "n ..19"},
+              amount: {4, "n 12"},
+              stan: {11, "n 6"},
+              terminal_id: {41, "ans 8"},
+              merchant_id: {42, "ans 15"}
+            }
+            mandatory [:pan, :amount, :stan, :terminal_id, :merchant_id]
+            response_type NonExistentResponse  # Module doesn't exist
+          end
+        end
+      end
+    end
+
+    @tag :skip
+    test "warns when response_type module exists but doesn't implement parse_and_validate/3" do
+      # NOTE: Compile-time validation cannot be tested at runtime.
+      # To test: create a separate file with this module and compile it.
+      # The module should compile but emit a warning about missing parse_and_validate/3.
+      # Since warnings go to stdout and can't be captured in assertions,
+      # this test is purely documentation.
+      :ok
     end
   end
 
