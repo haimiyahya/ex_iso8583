@@ -8,6 +8,7 @@ defmodule Ex_Iso8583.TransactionRequest do
   ## Key Features
 
   - **Compile-time validation** - Ensures mandatory fields are defined at compile time
+  - **Response type validation** - Validates that `response_type` module exists and implements required functions
   - **Request formation** - Forms ISO 8583 binary messages from structs
   - **Type-safe pairing** - Links requests with expected response types
   - **Field validation** - Validates field values before forming messages
@@ -114,6 +115,10 @@ defmodule Ex_Iso8583.TransactionRequest do
   2. **Field mapping consistency** - All fields in `mandatory`/`optional` must be
      defined in `fields` mapping
   3. **Field format syntax** - Field format strings must be valid ISO 8583 format
+  4. **Response type validation** - If `response_type` is specified, the module must:
+     - Exist and be loadable
+     - Implement `parse_and_validate/3` (warns if missing)
+     - This ensures type-safe request-response pairing at compile time
 
   ## Request Definition Options
 
@@ -212,6 +217,7 @@ defmodule Ex_Iso8583.TransactionRequest do
 
       Module.register_attribute(__MODULE__, :request_config, accumulate: true)
       @before_compile Ex_Iso8583.TransactionRequest
+      @after_compile Ex_Iso8583.TransactionRequest
     end
   end
 
@@ -302,11 +308,39 @@ defmodule Ex_Iso8583.TransactionRequest do
   @doc """
   Defines the expected response type for this request.
 
-  This enables type-safe request-response pairing.
+  This enables type-safe request-response pairing with compile-time validation.
+
+  ## Validation
+
+  The specified response type module is validated at compile time to ensure:
+  - The module exists and can be loaded
+  - The module implements `parse_and_validate/3` (warning if not)
+
+  ## Errors
+
+  If the response type module does not exist, compilation fails with a detailed error
+  message showing what module was not found and how to define it.
 
   ## Example
 
       response_type SaleResponse
+
+  This requires that `SaleResponse` exists and uses `Ex_Iso8583.TransactionType`:
+
+      defmodule SaleResponse do
+        use Ex_Iso8583.TransactionType
+
+        defstruct [:response_code, :stan, :auth_code]
+
+        transaction_type "0210" do
+          fields %{
+            response_code: {39, "an 2"},
+            stan: {11, "n 6"},
+            auth_code: {38, "an 6"}
+          }
+          mandatory [:response_code, :stan]
+        end
+      end
   """
   defmacro response_type(module) do
     quote do
@@ -545,6 +579,23 @@ defmodule Ex_Iso8583.TransactionRequest do
     end
   end
 
+  @doc false
+  def __after_compile__(env, _bytecode) do
+    # Get the response_type from stored attributes
+    response_type =
+      Module.get_attribute(env.module, :request_config)
+      |> Enum.find_value(fn
+        {:response_type, val} -> val
+        _ -> nil
+      end)
+
+    if response_type do
+      validate_response_type!(env.module, response_type)
+    end
+
+    :ok
+  end
+
   defp build_config(config) do
     mti = get_config(config, :mti)
     processing_code = get_config(config, :processing_code, "*")
@@ -660,6 +711,47 @@ defmodule Ex_Iso8583.TransactionRequest do
     end
 
     :ok
+  end
+
+  defp validate_response_type!(request_module, response_type) do
+    if Code.ensure_loaded?(response_type) do
+      # Module exists, check it has required functions
+      unless function_exported?(response_type, :parse_and_validate, 3) do
+        IO.warn("""
+        [Ex_Iso8583.TransactionRequest] Response type module #{inspect(response_type)}
+        does not implement parse_and_validate/3
+
+        Request module: #{inspect(request_module)}
+
+        Make sure #{inspect(response_type)} uses Ex_Iso8583.TransactionType
+        """, [])
+      end
+    else
+      # Module doesn't exist - this is a compile error
+      raise CompileError,
+        description: """
+        [Ex_Iso8583.TransactionRequest] Response type module not found: #{inspect(response_type)}
+
+        Request module: #{inspect(request_module)}
+
+        The response_type must be a valid module that exists.
+
+        Example:
+            defmodule #{inspect(response_type)} do
+              use Ex_Iso8583.TransactionType
+
+              defstruct [:response_code, :stan]
+
+              transaction_type "0210" do
+                fields %{
+                  response_code: {39, "an 2"},
+                  stan: {11, "n 6"}
+                }
+                mandatory [:response_code]
+              end
+            end
+        """
+    end
   end
 
   @doc """
