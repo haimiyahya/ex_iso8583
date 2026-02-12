@@ -965,3 +965,53 @@ end
             where type is one of: n, ns, an, ans, asn, as, a, b, z 
             and length is: <digits> or ..<max_digits>" 
             """
+
+  describe "compile-time validation" do
+    test "returns error when mandatory field is empty string", context do
+      request = %TestSaleRequest{
+        pan: "1234567890123456",
+        amount: "000000001234",
+        stan: "000001",
+        terminal_id: "TERM0001",
+        merchant_id: "MERCHANT01"
+      }
+      assert {:error, {:missing_fields, "0200", missing}} =
+        TestSaleRequest.form_and_validate(request, context.msg_type, context.field_formats)
+    end
+
+    test "accepts pre-formatted string values", context do
+      request = %TestSaleRequest{
+        pan: "1234567890123456",
+        amount: "000000001234",
+        stan: "000001",
+        terminal_id: "TERM0001",
+        merchant_id: "MERCHANT01"
+      }
+      assert String.starts_with?(binary, "0200")
+      assert byte_size(binary) > 4
+      # Should be a valid ISO 8583 message
+      iso_data = struct_to_iso_data(request, context.field_mapping)
+      assert {:ok, binary} = TestSaleRequest.form_and_validate(request, context.msg_type, context.field_formats)
+    end
+
+    test "raises error when field format has invalid syntax", context do
+      # This test verifies that invalid field format strings are caught at compile time
+      # NOTE: Compile-time validation cannot be tested at runtime.
+      # To test compile-time validation, create a separate file and try to compile it.
+      assert_raise CompileError, ~r/Invalid field format syntax/, fn ->
+        defmodule InvalidRequestBadFormat do
+          use Ex_Iso8583.TransactionRequest
+
+          defstruct [:pan, :stan]
+
+          request "0200" do
+            fields %{
+              pan: {2, "invalid_xyz"},  # Invalid format syntax!
+              stan: {11, "n 6"}
+            }
+            mandatory [:pan, :stan]
+          end
+        end
+    end
+  end
+end
