@@ -525,6 +525,27 @@ defmodule Ex_Iso8583.TransactionRequestTest do
       # this test is purely documentation.
       :ok
     end
+
+    @tag :skip
+    test "raises error when duplicate field numbers in fields mapping" do
+      # NOTE: Compile-time validation cannot be tested at runtime.
+      assert_raise CompileError, ~r/Duplicate field numbers.*fields.*mapping/, fn ->
+        defmodule InvalidRequestDuplicateFields do
+          use Ex_Iso8583.TransactionRequest
+
+          defstruct [:pan, :stan]
+
+          request "0200" do
+            fields %{
+              pan: {2, "n ..19"},
+              stan: {11, "n 6"},
+              stan: {11, "n 6"}  # Duplicate field number!
+            }
+            mandatory [:pan, :stan]
+          end
+        end
+      end
+    end
   end
 
   describe "validate_field_format/1" do

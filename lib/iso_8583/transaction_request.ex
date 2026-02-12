@@ -115,7 +115,8 @@ defmodule Ex_Iso8583.TransactionRequest do
   2. **Field mapping consistency** - All fields in `mandatory`/`optional` must be
      defined in `fields` mapping
   3. **Field format syntax** - Field format strings must be valid ISO 8583 format
-  4. **Response type validation** - If `response_type` is specified, the module must:
+  4. **No duplicate field numbers** - Each field number in `fields` mapping must be unique
+  5. **Response type validation** - If `response_type` is specified, the module must:
      - Exist and be loadable
      - Implement `parse_and_validate/3` (warns if missing)
      - This ensures type-safe request-response pairing at compile time
@@ -707,6 +708,39 @@ defmodule Ex_Iso8583.TransactionRequest do
             #{inspect(overlap)}
 
         A field can be either mandatory or optional, not both.
+        """
+    end
+
+    # Validate 5: No duplicate field numbers in fields mapping
+    field_numbers =
+      fields
+      |> Enum.map(fn {_key, {num, _fmt}} -> num end)
+      |> Enum.frequencies()
+
+    duplicates = Enum.filter(field_numbers, fn {_num, count} -> count > 1 end)
+
+    if duplicates != [] do
+      duplicate_info =
+        duplicates
+        |> Enum.map(fn {num, _count} ->
+          field_name =
+            Enum.find(fields, fn {_key, {field_num, _fmt}} -> field_num == num end)
+            |> case do
+              {_key, name} -> name
+              nil -> "?"
+            end
+
+          "#{num} (#{field_name})"
+        end)
+
+      raise CompileError,
+        description: """
+        [Ex_Iso8583.TransactionRequest] Duplicate field numbers in `fields` mapping:
+
+            #{inspect(duplicate_info)}
+
+        Each ISO 8583 field number can only be defined once.
+        Please remove the duplicate field definitions.
         """
     end
 
