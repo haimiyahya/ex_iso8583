@@ -2314,7 +2314,7 @@ defmodule Iso8583.Transport.WebSocket.Client do
     <<length::big-integer-size(prefix_bytes * 8), data::binary>>
   end
 
-  defp build_context(state, response_tpdu \\ nil) do
+  defp build_context(state, response_tpdu) do
     Context.new(
       transport_ref: :client,
       client_id: "ws_client",
